@@ -22,7 +22,7 @@ JOURNAL.md는 매 세션 통째로 읽지 않는다. 다음 상황에서만 확�
 
 ## 참고 문서
 
-- **STATE_DRAFT.md** — State 8개 최상위 필드 스키마. State 관련 코드 작업 전 확인.
+- **STATE_SCHEMA.md** — State 8개 최상위 필드 스키마. State 관련 코드 작업 전 확인.
 - **AGENT_NODE_LIST.md** — agent/역할(role_tag) 목록, 각자의 판단 범위, 검증agent 작성
   원칙. agent 관련 코드 작업 전 확인. **새 agent/역할을 추가하기 전, 여기 기준으로
   기존 agent에 흡수될 수 있는지 먼저 검토한다.**
