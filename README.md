@@ -16,3 +16,4 @@
 
 - **[DESIGN.md](DESIGN.md)** — 구현 진행 상황
 - **[JOURNAL.md](JOURNAL.md)** — 단계별 진행 기록
+- **[MILESTONES.md](MILESTONES.md)** — 마일스톤(M0~M8)별 범위/검증 기준
