@@ -6,7 +6,7 @@ Step1 원칙4(판단이 필요한 노드만 Agent)로 각 항목을 분류.
 
 동시성 모델은 asyncio(단일 프로세스) — 아래 "지속 태스크"는 각자 독립된
 asyncio 태스크로 서로 안 막히고 진행, "이벤트 워커풀"은 트리거될 때만
-반응. 상세는 STATE_DRAFT.md "동시성 모델" 절 참고.
+반응. 상세는 STATE_SCHEMA.md "동시성 모델" 절 참고.
 
 ## 전체 구조 요약
 
@@ -135,14 +135,14 @@ GRAPH_FLOW.md·AGENT_NODE_LIST.md 참고.
   목적지에 push, `check_failed`는 검증agent가 자체 재시도 후 그래도 안
   되면 escalation
 - validation agent 자신의 오판(`passed`를 잘못 낸 경우)은 구조적 한계
-  (STATE_DRAFT.md 참고) — 실시간 방지 불가, 다운스트림 불일치로 사후 발견 시
+  (STATE_SCHEMA.md 참고) — 실시간 방지 불가, 다운스트림 불일치로 사후 발견 시
   escalation
 
 ## 외부 경계 (그래프 노드 아님, 판단 없음)
 
 물리적으로 실제 일이 일어나는 곳 — 우리가 판단하지 않고, 결과(가능/불가,
 실제 수치)만 데이터로 받음. 지금은 파일(실데이터/현실적 시뮬레이션)로
-읽되, 하나의 인터페이스 함수 뒤에 감춰서 나중에 실제 API로 교체해도
+읽되, 하나의 인터페이스 함수로 추상화해서 나중에 실제 API로 교체해도
 협상 로직은 안 건드리게 함.
 
 ### sales_channel (role_tag: `sales_channel`)

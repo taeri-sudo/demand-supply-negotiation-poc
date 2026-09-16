@@ -2,7 +2,7 @@
 
 State/노드 목록이 "무엇이 있는지"였다면, 이 문서는 "그것들이 어떤 순서·
 조건으로 연결되는지"를 정리한다. 동시성 모델은 asyncio(단일 프로세스,
-STATE_DRAFT.md "동시성 모델" 참고) — 아래 "엣지"는 그래프의 정적 연결이
+STATE_SCHEMA.md "동시성 모델" 참고) — 아래 "엣지"는 그래프의 정적 연결이
 아니라 **태스크 간 신호(asyncio.Queue) 교환**으로 구현된다. 이 모델에서는
 "모든 회사의 응답이 도착해야 다음으로 넘어간다"는 제약이 없음 —
 supply_coordination 태스크는 그때그때 도착한 만큼만 보고 판단 가능.
@@ -91,7 +91,7 @@ GRAPH_FLOW.md·AGENT_NODE_LIST.md 참고.
 채널도 함께 지켜봐야** 함(새로 추가되는 구독 대상).
 
 **여전히 남는 한계**: 게이트로 막아도 검증agent 자신이 "이상 없음(passed)"을
-잘못 낸 경우는 실시간으로 못 잡음 — 이건 STATE_DRAFT.md "구조적 한계"에
+잘못 낸 경우는 실시간으로 못 잡음 — 이건 STATE_SCHEMA.md "구조적 한계"에
 남긴 대로, 다운스트림 불일치로 사후 발견되는 것 외에 방법이 없음(검증을
 검증하는 무한회귀를 피하기 위한 의도적 트레이드오프).
 
@@ -127,7 +127,7 @@ GRAPH_FLOW.md·AGENT_NODE_LIST.md 참고.
 
 공급망계획agent 간 직접 상호작용(procurement_plan↔production_plan 등)은
 표에서 제외 — 아직 미정, 지금은 반드시 supply_coordination을 경유.
-`exchanges`에 쌓이는 `routing_reason`(STATE_DRAFT.md 참고)이 이 미정
+`exchanges`에 쌓이는 `routing_reason`(STATE_SCHEMA.md 참고)이 이 미정
 상태를 나중에 풀 근거가 됨 — pm4py가 negotiation_log에서 "이 유형은 항상
 공급망조율의 추가 판단 없이 그냥 전달되더라"는 패턴을 찾으면 직접 연결
 edge로 승격.
