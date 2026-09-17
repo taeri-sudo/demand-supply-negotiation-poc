@@ -69,7 +69,7 @@ pytest-asyncio 없이도 `conftest.py`의 `anyio_backend` 픽스처만으로 비
 채우는 단계)을 구현하지 않은 채로도, 테스트가 `initial_proposed`를 직접
 넘겨 라운드 로직만 검증할 수 있어 pytest 전체가 통과했다 — candidate 선택
 경로 자체를 한 번도 실행하지 않고도 관련 테스트가 초록불이었다는 뜻이다.
-이후 `run_forecast_negotiation`(candidate 선택 → 라운드 루프 연결)을 추가하고,
+이후 `run_forecast_select_and_round`(candidate 선택 → 라운드 루프 연결)을 추가하고,
 그 경로를 직접 실행하는 통합 테스트를 별도로 만들었다.
 
 **ForecastProposalJudgment를 만들었다가 StructuredJudgment로 통합**:

@@ -29,9 +29,9 @@ demand-supply-negotiation-poc의 **현재 구현 상태**를 담는 문서. Stat
   (라운드 루프 — `forecast_agents[i].round_history`에 매 라운드 누적,
   `interaction_protocol`의 `max_rounds`를 안전장치로 사용, 수렴조건은 직전 대비
   proposed 변화율 < 10%(GRAPH_FLOW.md 원래 정의의 축소판 — 상세는 아래 "미구현"
-  참고), max_rounds 소진 시 `escalation_records`에 기록), `run_forecast_negotiation`
+  참고), max_rounds 소진 시 `escalation_records`에 기록), `run_forecast_select_and_round`
   (candidate 선택 → `forecast_agents[i].selected`/`selection_basis` 기록 →
-  라운드 루프까지 잇는 진입점). pytest 5건(candidate 선택 규칙, 수렴/max_rounds
+  라운드 루프까지 잇는 상위 진입점). pytest 5건(candidate 선택 규칙, 수렴/max_rounds
   소진 escalation/즉시 accepted, 선택→협상 통합 흐름). `capacity_pools.remaining_capacity`를
   최초 제안보다 작게 둔 상태에서 `run_forecast_supply_round`를 돌리면, 매
   라운드 `forecast_agents[i].round_history`에 기록되는 `proposed` 값이 실제로
