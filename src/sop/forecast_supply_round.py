@@ -13,8 +13,9 @@ GRAPH_FLOW.md "라운드 누적형" 상호작용을 구현하되, 이번 마일�
 - 수렴조건은 GRAPH_FLOW.md 원래 정의(변화폭 임계치 + forecast_reliability
   신뢰도 게이트)의 축소판 — forecast_reliability는 아직 영속화가 없어
   (STATE_SCHEMA.md 참고), 이번 마일스톤은 proposed 변화율 < 10%만 본다.
-- `run_forecast_negotiation`이 analysis 스텁(candidate) → forecast 후보 선택
-  판단(`forecast_candidate_selection.py`) → 이 협상 루프까지 잇는 진입점이다.
+- `run_forecast_select_and_round`가 analysis 스텁(candidate) → forecast 후보
+  선택 판단(`forecast_candidate_selection.py`) → 이 협상 루프까지 잇는
+  상위 진입점이다.
 """
 
 from .access import StateStore
@@ -166,7 +167,7 @@ async def run_forecast_supply_round(
     return final_value
 
 
-async def run_forecast_negotiation(
+async def run_forecast_select_and_round(
     store: StateStore,
     forecast_role_tag: str,
     supply_role_tag: str,

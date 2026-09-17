@@ -2,7 +2,7 @@ import pytest
 
 from sop.access import StateStore
 from sop.analysis_stub import get_stub_candidates
-from sop.forecast_supply_round import run_forecast_negotiation, run_forecast_supply_round
+from sop.forecast_supply_round import run_forecast_select_and_round, run_forecast_supply_round
 from sop.state import (
     CapacityPool,
     ForecastAgentRecord,
@@ -121,12 +121,12 @@ async def test_negotiation_accepts_immediately_when_capacity_covers_proposal():
     assert store.get_field("forecast", "escalation_records") == []
 
 
-async def test_run_forecast_negotiation_selects_candidate_then_negotiates():
+async def test_run_forecast_select_and_round_selects_candidate_then_negotiates():
     """analysis 스텁 candidate 선택(confidence 최고인 'a', value=100) →
     그 값을 최초 제안으로 협상 → remaining=70이면 77.5로 수렴."""
     store = make_store(remaining=70)
 
-    final_value = await run_forecast_negotiation(
+    final_value = await run_forecast_select_and_round(
         store, "forecast", "supply_coordination", 0, "POOL-1", get_stub_candidates()
     )
 
