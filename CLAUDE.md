@@ -84,10 +84,14 @@ JOURNAL.md 엔트리 안에 "나중에 재검토한다"는 내용이 생기면, 
 - 모든 State 읽기/쓰기는 `role_permissions`를 검사하는 wrapper 함수(`get_field`/
   `set_field`)를 통해서만 한다. 직접 State를 건드리지 않는다.
 - 소스 코드는 src/sop/ 패키지 아래에 있다
-- agent 간 상호작용(엣지)을 구현하는 모듈의 파일명은 `interaction_protocol`의
+- agent 간 상호작용(엣지)을 구현하는 모듈의 파일명·함수명은 `interaction_protocol`의
   edge 이름을 따른다(예: `forecast<->supply_coordination` →
-  `forecast_supply_round.py`). "negotiation"처럼 `negotiation_log`(필드명)·
-  리포 이름(-negotiation-poc)과 겹치는 범용 단어는 파일명으로 쓰지 않는다.
+  `forecast_supply_round.py`의 `run_forecast_supply_round`). 여러 edge/단계를
+  묶는 상위 진입점 함수는 그 동작을 그대로 드러내는 이름을 쓴다(예:
+  candidate 선택과 라운드 협상을 잇는 함수는 `run_forecast_select_and_round`
+  처럼 두 동작을 나열하거나, 감싸는 함수명들을 그대로 딴다). "negotiation"처럼
+  `negotiation_log`(필드명)·리포 이름(-negotiation-poc)과 겹치는 범용 단어는
+  파일명·함수명 어디에도 쓰지 않는다.
 
 ## 실행
 
