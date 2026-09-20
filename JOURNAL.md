@@ -58,6 +58,9 @@ pytest-asyncio 없이도 `conftest.py`의 `anyio_backend` 픽스처만으로 비
 
 재검토 트리거(회사가 여러 개로 늘어남)는 DESIGN.md 참고.
 
+이후 해당 로직(라운드 협상) 자체가 폐기되며 이 판단도 함께 무효화됨 —
+2026-09-19 이후 기록 참고.
+
 ---
 
 ## 2026-09-16 — M1: candidate 선택 테스트 공백과 판단 스키마 통합
@@ -105,3 +108,86 @@ Claude Code가 `select_forecast_candidate`를 구현하며, STATE_SCHEMA.md가
   없는 조건을 미리 하드코딩하는 대신, 뒤로 미루는 쪽을 택했다.
 
 재검토 트리거(analysis 실물 연동, M3)는 DESIGN.md 참고.
+
+이후 해당 로직(라운드 협상) 자체가 폐기되며 이 판단도 함께 무효화됨 —
+2026-09-19 이후 기록 참고.
+
+---
+
+## 2026-09-19 — 인스턴스 단위 재검토: 회사 단위에서 (회사, item) 단위로
+
+발견 경위: 신제품/프로모션 트랙을 설계하다가, forecast_agents의
+candidates가 스칼라 하나만 담는 구조라 한 회사가 여러 item(예: 라면과
+과자)을 동시에 주문하는 경우를 표현할 수 없다는 게 드러남.
+
+- **회사 안에 item을 중첩시키는 안(기각)**: Step1의 Order-Item 실패
+  (한 item의 문제가 같은 Order의 무관한 item까지 막아버렸던 버그)가
+  재발할 구조적 위험이 있어 기각.
+- **(회사, item)을 평평한 별도 인스턴스로 분리(채택 후보)**: agent_id를
+  "A회사:라면"처럼 조합 키로 두면, 한 item의 문제가 다른 item에 영향을
+  안 주므로 Step1 문제가 구조적으로 발생하지 않음.
+- **capacity_pool의 공유/전용 라인 전환**: 농심 신라면건면 실제 사례로
+  확인 — 초기엔 여러 건면 제품이 한 라인을 changeover로 공유하다가,
+  수요가 확인되자 전용라인으로 전환함. 이 "공유↔전용 전환" 판단은
+  이미 production_plan agent의 판단 범위(스케줄링 결정)에 속하므로
+  새 메커니즘 없이 흡수 가능.
+- **신규 고객사 온보딩**: 유사 회사 패턴을 신뢰할 근거가 약함(계약조건이
+  회사마다 달라 일반화 어려움 — PLAN_LOG의 "리드관리는 agent화 어려움"
+  결론과 같은 이유). item별로 human_input 초기값을 받는 온보딩 절차가
+  필요할 것으로 봄.
+
+다음 세션에서 STATE_SCHEMA.md 스키마 변경부터 재설계 예정.
+
+---
+
+## 2026-09-20 — 검증agent 관찰형 정정, push/pull 원칙, agent 통합, 엣지 재분류
+
+### 검증agent: "게이트"(라우팅 권한 있음)에서 "관찰형"(판정만)으로 정정
+검증agent가 판정 후 다음 목적지로 직접 push하는 설계("critical path를
+막는 게이트")를 재검토한 결과 기각 — 이미 각 agent 자신의 기존 역할에
+라우팅 권한이 있다(forecast의 핸드오프 되돌림, supply_coordination의
+"공급망계획agent 문제 신호 처리"). 검증agent가 라우팅까지 대신하면 이
+권한이 중복된다. 판정(값이 문제 없는지)과 라우팅(문제가 생겼을 때 어디로
+되돌릴지)을 분리해, 검증agent는 `validation.status`만 State에 쓰고
+라우팅은 원래 그 권한을 가진 agent에게 맡기는 쪽으로 정정.
+
+### passed/flagged의 push 여부는 받는 agent의 성격(워커풀 vs 조율)에 따라 갈림
+처음엔 "passed는 항상 push 없음, 다음 agent가 알아서 pull"로 정리했으나,
+이 pull이 실제로 어떤 트리거로 이뤄지는지 재확인하는 과정에서 문제가
+드러남 — "다음 agent가 pull한다"는 설명이 GRAPH_FLOW.md 자신의 Push/Pull
+정의(pull은 `queue.get()`, 즉 누군가 먼저 push해야 가져갈 게 있음)와
+모순됐다. 검증agent가 push를 안 하면 애초에 다음 agent를 깨울 주체가
+없다는 지점을 확인 후 기준을 재정립:
+- **워커풀 성격**(트리거되면 반응, 여러 회사 요청을 안건 단위로 처리 —
+  검증agent 자신, procurement_plan/production_plan/logistics_plan):
+  `passed`는 push 없음 — 안건 단위로 이미 확인하러 가는 게 본래 하는
+  일이라 확인 자체가 부담이 아님.
+- **조율 성격**(계속 능동적으로 여러 요청을 처리·판단 —
+  supply_coordination): `passed`도 push — 우선순위 계산·"공급망계획agent
+  문제 신호 처리" 같은 다른 조율 업무로 계속 바빠서, 자기 검증 결과까지
+  매번 확인하러 다닐 여유가 없기 때문.
+- `flagged`는 agent 성격과 무관하게 항상 작성agent에게 push(기존 유지) —
+  pull만으로는 작성agent가 "자기 값에 문제가 생겼는지"를 미리 알 방법이
+  없어 깨어나지 못하기 때문.
+
+### analysis agent와 forecast agent를 하나로 통합
+두 agent로 나눴던 유일한 이유는 "되돌림 지점이 다르면 agent도 분리"였는데,
+되돌림 지점을 재검토한 결과 "데이터 소스 문제"/"모델 선택 문제" 두 값으로
+충분하고 "후보 선택만 다시"라는 세 번째 값은 두지 않기로 함 — 모델
+선택부터 다시 돌리면 새 후보가 나와 후보 선택도 자연히 다시 이뤄지므로
+별도 재개 지점 없이 커버된다. 분리 이유 자체가 사라져 `forecast_agents[]`
+하나로 통합(8개 → 7개 최상위 필드).
+
+### supply_coordination→forecast를 라운드 협상에서 핸드오프형으로 재분류
+원래 forecast↔supply_coordination 전체를 라운드 누적형 협상(capacity
+비교, 격차 좁히기)으로 다뤘으나, infeasible은 "숫자를 조금씩 좁혀가며
+밀당"할 대상이 아니라 "선택이 틀렸을 수 있으니 다시 하라"는 신호라는
+점에서 재분류. `forecast → supply_coordination`(정방향, 평소)은 단방향
+최적화, `supply_coordination → forecast`(역방향, 예외 — 공급망계획agent가
+infeasible을 보냈을 때만)는 analysis+forecast 통합 시 만든 핸드오프
+메커니즘을 그대로 재사용하는 것으로 정리.
+
+이 재분류로 M1이 구현했던 라운드 협상 코드(격차 50% 좁히기, 변화율
+수렴조건, capacity 동시읽기 Lock 여부, 수렴값 저장 위치 등)의 전제가
+사라짐 — 관련 JOURNAL 항목(2026-09-16 두 건)에 무효화 표시를 남기고,
+DESIGN.md M1 항목도 재작성했다.

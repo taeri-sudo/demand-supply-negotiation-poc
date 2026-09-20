@@ -10,10 +10,11 @@ supply_coordination 태스크는 그때그때 도착한 만큼만 보고 판단 
 ## 전체 구조 요약
 
 ```
-analysis agent(회사별 1개, 총 N개, role_tag: analysis) — 지속 태스크
-        ↕  (신호 기반, 핸드오프형)
 forecast agent(회사별 1개, 총 N개, role_tag: forecast) — 지속 태스크
-        ↕  (신호 기반, 라운드 누적형)
+   (데이터 수집→데이터 소스 판단→모델 선택→시나리오 계산→후보 선택을
+    한 agent 내부 단계로 수행 — 원래 analysis/forecast 두 agent였으나
+    되돌림 지점이 "데이터 소스 문제"/"모델 선택 문제" 둘로 충분해 통합)
+        ↕  (신호 기반, 평소 정방향 최적화 / 예외 시에만 역방향 핸드오프)
 supply_coordination agent(1개, role_tag: supply_coordination) — 지속 태스크
    ↕procurement_plan   ↕production_plan   ↕logistics_plan  (각 1개, 지속 태스크)
    (hub-and-spoke — 셋 다 직접 연결, 사슬 아님. 순서는 의존관계에 따른
@@ -21,13 +22,14 @@ supply_coordination agent(1개, role_tag: supply_coordination) — 지속 태스
         ↓
 실제 조달/생산/배송 (그래프 노드 아님, 외부 경계 — sales_channel과 같은 성격)
 
-validation agent(들) — 일감은 이벤트 트리거·무기억 워커풀 방식으로 받지만,
-결과는 critical path를 막는 **게이트**(값이 다음 소비자에게 가기 전 항상
-거침, 상세는 GRAPH_FLOW.md "검증 게이트" 참고). human_manager(들) —
+validation agent(들) — 일감은 이벤트 트리거·무기억 워커풀 방식으로 받고,
+판정(`passed`/`flagged`/`check_failed`)만 State에 쓴다 — 라우팅 권한은
+없고, push 여부는 받는 agent 성격(워커풀=pull, 조율=push)에 따른
+기계적 규칙일 뿐이다(상세는 GRAPH_FLOW.md "검증agent" 참고). human_manager(들) —
 escalation 발생 시에만 반응, 지속 태스크 아님.
 
 문제 발생 시: 공급망계획agent → supply_coordination → (필요시) forecast/
-analysis/채널/사람 escalation — 어디까지 되돌릴지는 interaction_protocol이
+채널/사람 escalation — 어디까지 되돌릴지는 interaction_protocol이
 규정.
 ```
 
@@ -50,31 +52,67 @@ GRAPH_FLOW.md·AGENT_NODE_LIST.md 참고.
 넣으면 아무도 안 깨어난다. 값을 쓰는 wrapper 함수(`set_field`)가 값 기록과
 동시에 해당 큐에 push하도록 구현해야 함(업무 로직이 매번 기억할 필요 없게).
 
-## 검증 게이트 (validation gate)
+## 검증agent
 
-**검증은 "옆에서 관찰"이 아니라 값이 다음 소비자에게 가기 전 반드시 거치는
-관문이다** — 검증 없이 다음 단계가 먼저 진행되면, 나중에 이상이 발견됐을 때
-되돌리는 비용(이미 진행된 작업 롤백, negotiation_log 오염, 이미 escalation된
-상태와 뒤늦은 되돌림이 겹치는 복잡성)이 더 크다고 판단해 확정.
+**검증agent는 판정 권한만 갖고, 라우팅 권한은 갖지 않는다.** "값이 문제
+없는지"는 검증agent가 판단하지만, "문제가 생겼을 때 그걸 어디로 되돌릴지"는
+이미 각 agent 자신의 기존 역할에 있는 권한이다 — forecast의 핸드오프
+되돌림, supply_coordination의 "공급망계획agent 문제 신호 처리" 판단 등.
+검증agent가 라우팅까지 대신하면 이 권한이 중복된다(이전에 "critical path를
+막는 게이트, 검증agent가 직접 다음 큐에 push"로 정정한 적이 있으나 번복 —
+판정과 라우팅을 분리).
 
 흐름:
 1. 값을 쓴 agent는 **원래 의도한 다음 agent 큐가 아니라, 검증agent 큐에만
-   push**
+   push**(변경 없음)
 2. 검증agent(워커풀, 무기억)가 pull해서 확인 — 판단3계층 적용:
-   - **①규칙(빠름, 대부분)**: 대상 agent의 계산을 **재현하지 않고**,
+   - **①규칙**: 대상 agent의 계산을 **재현하지 않고**,
      독립적인 제약조건만 확인(예: 배분 합계가 `capacity_pools` 총량을
      넘는가, `role_tag`가 실제 그 필드 쓰기 권한이 있는가). 계산을
      재현하면 항상 "통과"만 나오는 죽은 검증이 됨 — 반드시 피해야 함
-   - **②agent판단(느림, 드묾)**: "이 근거가 지금 상황에서 타당한가" 같은
+   - **②agent판단**: "이 근거가 지금 상황에서 타당한가" 같은
      애매한 판단만 LLM으로
-   - `validation.status`: `"passed"` | `"flagged"` | `"check_failed"`
-3. 결과에 따라 검증agent가 **직접 다음 큐에 push**:
-   - **`passed`**: 원래 의도했던 다음 agent 큐로 push (정상 진행)
-   - **`flagged`**: 레코드를 만든 agent(문제 원인 제공자)의
-     `validation_result.{role_tag}` 큐로 push — 그 agent가 판단3계층으로
-     재조정 여부 결정. **같은 `routing_reason`(또는 거부 사유)이 연속 K회
-     반복되면 "이 agent 선에서 구조적으로 안 풀림"으로 간주해 `max_rounds`
-     소진을 기다리지 않고 상위로 확장**. K는 `interaction_protocol`의
+3. 검증agent는 **판정 결과(`validation.status`)만 State에 쓴다** — push
+   여부는 판정 결과와 받는 agent 성격에 따라 갈린다(워커풀 성격이 받는
+   `passed`는 push 없음 — 값 쓰기와 push가 항상 짝이라는 기존 원칙의
+   예외). 판정별 후속:
+   - **`passed`**: push 여부가 **값을 받는 agent의 성격**에 따라 갈린다 —
+     "판정만 하고 라우팅은 안 한다"는 원칙과는 별개로(어디로 보낼지
+     정하는 게 아니라, 이미 정해진 목적지에 "지금 넘길지 말지"만 정하는
+     기계적 규칙이라 라우팅 판단이 아니다):
+     - **받는 쪽이 워커풀 성격**(트리거되면 반응 — 검증agent 자신,
+       `procurement_plan`/`production_plan`/`logistics_plan`처럼 여러
+       회사 요청을 안건 단위로 처리하는 agent들): 검증agent는 **push하지
+       않는다**(값 쓰기와 push가 항상 짝이라는 기존 원칙의 예외). 이런
+       agent는 이미 자기가 처리 중인 안건 단위로 State를 스스로 확인하러
+       가므로(pull), 검증agent가 대신 넘겨줄 필요가 없다. 예:
+       `supply_coordination`이 `procurement_plan`에게 보낸 요청이
+       `passed`면, `procurement_plan`이 스스로 확인해서 처리.
+     - **받는 쪽이 조율 성격**(계속 능동적으로 여러 요청을 처리·판단하는
+       agent — `supply_coordination`): 검증agent가 **push**한다(원래
+       의도했던 목적지 채널로 — `flagged`가 쓰는 `validation_result.
+       {role_tag}`와는 다른, 그 값의 정상적인 수신 채널). `supply_coordination`은
+       우선순위 계산·"공급망계획agent 문제 신호 처리" 같은 다른
+       판단을 계속 수행 중이라, 검증 결과 확인을 스스로 챙기게 하면 그
+       판단 업무에 부담이 됨 — 그래서 검증agent가 대신 알려준다. (`procurement_plan` 등
+       워커풀 성격 agent에는 이 이유가 해당 안 됨 — 안건 단위 확인이
+       애초에 이들의 본래 일이라 확인 자체가 부담이 아니다.) 예:
+       `forecast`가 선택한 candidate가 `passed`면 `supply_coordination`
+       에게 push, `procurement_plan`의 응답이 `passed`면
+       `supply_coordination`에게 push.
+     - 각 agent가 어느 쪽인지는 AGENT_NODE_LIST.md의 agent별 설명(몇 개
+       회사/안건을 동시에 처리하는지)을 따른다.
+   - **`flagged`**: 검증agent가 레코드를 만든 작성agent(문제 원인
+     제공자)의 `validation_result.{role_tag}` 채널로 **push**한다 —
+     pull만으로는 작성agent가 "자기 값에 문제가 생겼는지"를 미리 알 수
+     없어 깨어나지 못하기 때문(그래서 이 경우만 push가 필요). **검증agent는
+     "누구에게 문제가 있는지"만 알리고, "그 문제를 어디로 되돌릴지"는
+     판단하지 않는다** — 이후 처리(자체 재조정할지, 더 위로 되돌릴지)는
+     작성agent 자신의 기존 역할이 판단한다(검증agent가 그래프 구조 전체를
+     알아야 하는 상황을 피하기 위함). **같은 `routing_reason`(또는 거부
+     사유)이 연속 K회 반복되면 "이 agent 선에서 구조적으로 안 풀림"으로
+     간주해 `max_rounds` 소진을 기다리지 않고 상위로 확장**하는 판단도
+     작성agent 쪽의 몫 — K는 `interaction_protocol`의
      `repeat_escalation_threshold`(edge별 기준값 하나, 예: 3)이고, 실제
      "몇 번 반복됐는지"는 별도로 저장하지 않음 — 그 edge의
      `exchanges`/`round_history`를 최근 것부터 훑어 같은 사유가 연속
@@ -82,47 +120,81 @@ GRAPH_FLOW.md·AGENT_NODE_LIST.md 참고.
      다른 edge로 넘어가면(예: 상위로 확장돼 다른 agent가 처리) 그 agent의
      기록에서 새로 계산되므로 자동으로 리셋됨(누적 이월 없음)
    - **`check_failed`**(검증 절차 자체가 비정상 종료 — 판단 문제가 아니라
-     시스템 장애): 검증agent가 몇 차례 자체 재시도 → 그래도 안 되면
-     escalation 큐로 push("시스템 장애" 사유, "판단 이상"과 구분). **원래
-     다음 agent는 이 상태의 레코드를 pull하지 않음**(검증 미해결 상태로
-     방치되지 않도록 대상에서 제외)
+     시스템 장애): 라우팅 판단이 아니라 장애 처리라 성격이 달라 기존
+     그대로 유지 — 검증agent가 몇 차례 자체 재시도 → 그래도 안 되면
+     escalation 큐로 **push**("시스템 장애" 사유, "판단 이상"과 구분).
+     **다음 agent는 이 상태의 레코드를 받지 않음**(워커풀 성격이면
+     pull 대상에서, 조율 성격이면 push 대상에서 제외 — 검증 미해결
+     상태로 방치되지 않도록 어느 경로로도 전달되지 않음)
 
-각 지속 태스크는 기존 협상 채널에 더해 **자기 `validation_result.{role_tag}`
-채널도 함께 지켜봐야** 함(새로 추가되는 구독 대상).
+`flagged`, `check_failed`, 그리고 조율 성격 agent가 받는 `passed`처럼
+검증agent가 실제로 push하는 경우에 한해, 그 push를 받는 지속 태스크는
+관련 채널을 지켜봐야 함 — `flagged`/`check_failed`는 **자기
+`validation_result.{role_tag}` 채널**(문제가 생겼다는 알림, 새로 추가되는
+구독 대상), `passed`는 그 값의 **원래 정상적인 수신 채널**(기존에 이미
+지켜보고 있던 채널)이라 별도 구독이 필요 없다.
 
-**여전히 남는 한계**: 게이트로 막아도 검증agent 자신이 "이상 없음(passed)"을
-잘못 낸 경우는 실시간으로 못 잡음 — 이건 STATE_SCHEMA.md "구조적 한계"에
-남긴 대로, 다운스트림 불일치로 사후 발견되는 것 외에 방법이 없음(검증을
-검증하는 무한회귀를 피하기 위한 의도적 트레이드오프).
+**여전히 남는 한계**: 검증agent 자신이 "이상 없음(passed)"을 잘못 낸
+경우는 실시간으로 못 잡음 — 이건 STATE_SCHEMA.md "구조적 한계"에 남긴
+대로, 다운스트림 불일치로 사후 발견되는 것 외에 방법이 없음(검증을
+검증하는 무한회귀를 피하기 위한 의도적 트레이드오프). `flagged`/
+`check_failed`는 능동적으로 알리므로 이 한계에서 제외된다.
 
-## 상호작용 두 가지 유형
+## 상호작용 세 가지 유형
 
-- **핸드오프형** (analysis↔forecast만 해당): 같은 값을 다듬는 게 아니라
-  **재실행 지시** — forecast가 되돌리면 analysis는 이전 결과를 이어서
+- **핸드오프형** (supply_coordination→forecast, 역방향·예외): 같은 값을
+  다듬는 게 아니라 **재실행 지시** — 되돌림을 받으면 이전 결과를 이어서
   다듬는 게 아니라 새로 계산해서 덮어씀(현재값만 유지, 이력은
-  negotiation_log). 되돌릴 때 `suspected_cause`에 따라 재개 지점이 다름:
-  - "모델 선택이 문제" → 모델 선택 단계부터만 재실행(수집된 데이터는 재사용)
-  - "데이터 소스 자체가 부적합"(자사 이력으로 부족) → 데이터 수집부터 재실행
-- **라운드 누적형** (forecast↔supply_coordination,
-  supply_coordination↔공급망계획agent들): `round_history`/`exchanges` 배열에
-  **누적** — 이전 라운드를 지우지 않고 옆에 쌓으며 제안을 조금씩 조정.
-  `request`/`response`는 자유 객체라 단순 가부가 아니라 역제안(대안 조건)을
-  담을 수 있음 — "협상"과 "일방 통보(예: 검증)"를 가르는 지점.
+  negotiation_log). 공급망계획agent가 infeasible을 보냈을 때만 열리는
+  예외 경로 — 평소엔 아예 열리지 않는다. infeasible은 "숫자를 조금씩
+  좁혀가며 밀당"할 대상이 아니라 "선택이 틀렸을 수 있으니 다시 하라"는
+  신호이므로, 새 라운드 메커니즘을 만들지 않고 forecast agent 자신의
+  내부 재실행 메커니즘(원래 analysis↔forecast 두 agent 사이에서 쓰던
+  것 — 지금은 통합돼 forecast agent 내부 로직이다, STATE_SCHEMA.md
+  `forecast_agents` "되돌림" 참고)을 그대로 재사용한다. `suspected_cause`에
+  따라 재개 지점이 다름:
+  - "데이터 소스 문제" → 데이터 수집부터 재실행
+  - "모델 선택 문제" → 모델 선택 단계부터 재실행(수집된 데이터는 재사용,
+    이후 시나리오 계산·후보 선택은 전부 다시 돎)
+- **최적화** (forecast→supply_coordination 정방향, 평소 경로): forecast가
+  선택한 candidate 값을 supply_coordination이 우선순위 점수 산출 후
+  `allocation_candidate`로 생성하는 **단방향 전달** — 라운드가 쌓이지
+  않는다. 상대의 응답을 받아 값을 조정하는 절차가 아니라 한 번의 계산으로
+  끝나므로 "협상"이 아니다. 다만 이건 **협상 응답(값 조정)이 없다는
+  뜻일 뿐**, 검증을 아예 안 거친다는 뜻은 아니다 — 검증agent의 `flagged`
+  되돌림 경로(아래 "검증agent" 참고)는 다른 모든 엣지와 동일하게 이
+  엣지에도 적용된다.
+- **라운드 누적형(협상)** (supply_coordination↔공급망계획agent들):
+  `round_history`/`exchanges` 배열에 **누적** — 이전 라운드를 지우지 않고
+  옆에 쌓으며 제안을 조금씩 조정. `request`/`response`는 자유 객체라
+  단순 가부가 아니라 역제안(대안 조건)을 담을 수 있음 — "협상"과 "일방
+  통보(예: 검증)"를 가르는 지점. 요청 내용은 supply_coordination의
+  최적화 계산 결과지만, 이 엣지 자체는 처음부터 라운드 누적형이다 —
+  요청 이후 `feasible`/`infeasible` 응답을 반드시 받아야 하고,
+  `feasible`이면 1라운드 만에 즉시 종료되며, `infeasible`일 때만 라운드가
+  연장된다.
 
-두 유형 모두 위 검증 게이트를 거친 뒤에야 상대에게 값이 전달된다.
+같은 agent 쌍(forecast/supply_coordination) 사이에도 방향에 따라 유형이
+갈릴 수 있다 — 평소엔 정방향 최적화만 흐르고, 공급망계획agent의 infeasible
+신호로 supply_coordination이 되돌림을 시작했을 때만 역방향 핸드오프
+(재실행 지시)가 열린다(엣지 표 참고).
+
+세 유형 모두 검증agent의 판정을 받는다 — `flagged`면 작성agent에게
+되돌아가고, `check_failed`면 다음 소비자가 그 레코드를 걸러낸다(위
+"검증agent" 참고).
 
 ## 엣지 표
 
 | edge | 유형 | 반복 여부 | 종료조건 | escalation 대상 |
 |---|---|---|---|---|
-| analysis ↔ forecast | 핸드오프형 | 아니오 | 재실행 완료(재개 지점부터) | 없음(같은 클러스터 내 이동) |
-| forecast ↔ supply_coordination | 라운드 누적형 | 예 | 변화폭 임계치 이하 **+** forecast_reliability 신뢰도 게이트 통과 | max_rounds 소진 → 사람 |
-| supply_coordination ↔ procurement_plan | 라운드 누적형 | 예 | `response_status: feasible` | max_rounds 소진 → 사람, 또는 공급망조율 판단으로 forecast/analysis/채널까지 재확장 |
+| forecast → supply_coordination (정방향, 평소) | 단방향 전달(최적화) | 아니오 | forecast가 선택한 candidate 값을 우선순위 점수 산출 후 allocation_candidate로 생성 | 없음 |
+| supply_coordination → forecast (역방향, 예외) | 핸드오프형 — 공급망계획agent(procurement_plan 등)가 infeasible을 보냈을 때만 열림 | 아니오 | 재실행 완료(재개 지점부터) | 없음(forecast 자신의 후보 선택 판단3계층 — ③ 사람 escalation 포함 — 에 위임) |
+| supply_coordination ↔ procurement_plan | 라운드 누적형 | 예 | `response_status: feasible` | max_rounds 소진 → 사람, 또는 공급망조율 판단으로 forecast/채널까지 재확장 |
 | supply_coordination ↔ production_plan | 라운드 누적형 | 예 | 위와 동일 | 위와 동일 |
 | supply_coordination ↔ logistics_plan | 라운드 누적형 | 예 | 위와 동일 | 위와 동일 |
 | supply_coordination → sales_channel | 단방향(출력) | 아니오 | 즉시(배분 결정 반영) | 없음 |
-| sales_channel → analysis | 단방향(입력) | 아니오 | 즉시(실적 데이터 유입) | 없음 |
-| 작성 agent → validation agent(들) | **게이트**(critical path) | 아니오 | `passed`/`flagged`/`check_failed` 판정 | check_failed 반복 시 사람(시스템 장애 사유) |
+| sales_channel → forecast | 단방향(입력) | 아니오 | 즉시(실적 데이터 유입) | 없음 |
+| 작성 agent → validation agent(들) | 판정(라우팅 권한 없음) | 아니오 | `passed`/`flagged`/`check_failed` 판정 | check_failed 반복 시 사람(시스템 장애 사유) |
 | escalation_trigger → human_manager | 단방향 | 아니오 | 사람의 resolution 입력 | (최종 단계) |
 
 공급망계획agent 간 직접 상호작용(procurement_plan↔production_plan 등)은
@@ -138,7 +210,9 @@ edge로 승격.
 기준을 정리:
 
 - **지속되는 정체성이 있는 안건**(forecast_agents처럼 "A회사"에 계속
-  매임) → **배열 + agent_id**, 각자 자기 이력(`round_history` 등)을 쌓음
+  매임) → **배열 + agent_id**, 각자 자기 정체성에 매인 값을 유지 — 라운드가
+  실제로 쌓이는 필드(`exchanges` 등)가 있으면 이력까지, forecast_agents처럼
+  핸드오프형이면 현재값만(이력은 negotiation_log)
 - **워커풀처럼 아무나 다음 안건을 집어가는 경우**(validation agent들,
   또는 조달담당자가 여러 명으로 쪼개지는 미래 시나리오) → **별도 배열
   불필요** — 이미 안건 기준으로 존재하는 필드(`exchanges[i]` 등)에

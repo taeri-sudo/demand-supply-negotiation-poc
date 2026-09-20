@@ -15,35 +15,44 @@ GRAPH_FLOW 세 문서에 분산되어 있다. 이 요청은 **코드 작성이 �
 
 `get_field`/`set_field` wrapper(role_permissions 검사 + set 시 큐 push를 짝짓는 것)는
 얇은 함수 하나에 불과하지만, CLAUDE.md가 "모든 State 접근은 wrapper를 통해서만"이라고
-못박은 이유대로 나중에 끼워 넣으면 이미 짠 negotiation 로직 전체를 다시 손봐야 한다.
-반대로 `capacity_pools` 없이 시작하면 forecast↔supply_coordination이 "즉시 수락"만
-반복하는 가짜 협상이 되어, 이 프로젝트의 핵심 목표(서로의 판단에 실제로 영향을 주는
-다회 협상)를 처음부터 검증할 수 없다.
+못박은 이유대로 나중에 끼워 넣으면 이미 짠 로직 전체를 다시 손봐야 한다.
+반대로 `capacity_pools`를 M0에서 미루면, M4(여러 회사가 실제로 같은
+`capacity_pools`를 경합)와 M5(procurement_plan 등이 실제로 infeasible을 응답해
+라운드가 연장)에 가서야 State 스키마와 Lock 보호를 다시 설계해야 하고, 그
+시점에는 이미 M1~M3에서 그 스키마를 전제로 짠 로직을 다시 손봐야 한다.
 
-그래서 **State wrapper, capacity_pools, asyncio Queue처럼 "협상이 실제로 여러 라운드를
-거쳐 값에 영향을 주는가"를 증명하는 데 필요한 최소 실물은 초기 마일스톤에서 바로 실물로
-넣고, LLM 호출·실데이터 연동·SQLite 영속화·plan agent들의 정교한 판단 로직처럼
-"무엇을 응답하는가"의 디테일은 뒤로 미룬다.**
+그래서 **State wrapper, capacity_pools, asyncio Queue처럼 "여러 agent/회사가
+실제로 서로의 판단·자원에 영향을 주는가"를 M4(N개 회사의 capacity 경합)·M5
+(plan agent와의 실제 feasibility 라운드)에서 증명하는 데 필요한 최소 실물은
+M0에서 미리 실물로 넣고, LLM 호출·실데이터 연동·SQLite 영속화·plan agent들의
+정교한 판단 로직처럼 "무엇을 응답하는가"의 디테일은 뒤로 미룬다.**
 
 ## 전 마일스톤에 걸친 공통 규칙
 
 아래 세 가지는 특정 마일스톤의 범위가 아니라, 여러 마일스톤에 걸쳐 처음부터 지켜야
 나중에 재작업이 발생하지 않는 규칙이다.
 
-**1. 검증 게이트는 edge를 하드코딩하지 않고 `interaction_protocol`/`role_permissions`를
-읽어 라우팅한다(M2부터 적용).** "작성agent → 검증agent 큐 → 통과 시 목적지"라는
-경로 자체를 `if edge == "forecast<->supply_coordination"` 같은 분기로 짜지 않고,
-`interaction_protocol[]`에서 해당 edge의 검증agent role_tag·`max_rounds`·
-`repeat_escalation_threshold`·`escalation_target`을 조회해 동작하는 일반화된 함수로
-구현한다. 나중에 새 edge(예: plan agent 간 직접 상호작용, M5/M8에서 미확정으로 남긴 것)가
-추가돼도 게이트 코드는 손대지 않고 `interaction_protocol`에 항목만 추가하면 되어야 한다.
+**1. 검증agent는 edge를 하드코딩하지 않고 `interaction_protocol`/`role_permissions`를
+읽어 동작한다(M2부터 적용).** 검증agent는 라우팅 권한이 없고 판정만 한다(GRAPH_FLOW.md
+"검증agent" 참고) — `flagged`는 레코드를 만든 작성agent의
+`validation_result.{role_tag}` 채널로 push(작성agent의 role_tag를 그대로 쓰므로
+edge별 분기가 필요 없음), `check_failed`는 재시도 후 사람에게 push, `passed`는
+받는 agent가 워커풀 성격(스스로 pull)인지 조율 성격(push 필요)인지에 따라
+갈리는데 이것도 `if edge == "forecast<->supply_coordination"` 식으로 하드코딩하지
+않고 역할별 성격 분류(role_tag 기준)로 판단한다. `interaction_protocol`의
+`max_rounds`/`repeat_escalation_threshold`/`escalation_target`은 검증agent가
+아니라 `flagged`를 받은 작성agent 자신이 재조정할지·상위로 확장할지 판단할 때
+조회한다(검증agent가 그래프 구조 전체를 몰라도 되게 하기 위함). 나중에 새
+edge(예: plan agent 간 직접 상호작용, M5/M8에서 미확정으로 남긴 것)가 추가돼도
+검증agent 코드는 손대지 않고 `interaction_protocol`에 항목만 추가하면 되어야 한다.
 
 **2. 규칙 기반 판단 스텁은 LLM 구조화 출력과 동일한 pydantic 스키마로 반환한다(M1부터
-적용, M7에서 교체).** forecast의 후보 선택, analysis의 model_selection/data_source_basis
-판단, supply_coordination의 우선순위 판단, plan agent의 feasibility 판단처럼 M7에서
-LLM(②판단계층)으로 교체될 지점은, 지금 규칙 기반으로 구현하더라도 `{판단값, 근거}`
-형태의 공통 pydantic 모델을 반환하게 만든다. M7에서는 이 스텁 함수의 내부 구현만
-Gemini 구조화 출력 호출로 교체하고, 호출부(인터페이스)는 바뀌지 않아야 한다.
+적용, M7에서 교체).** forecast(통합된 예측 agent)의 후보 선택·model_selection·
+data_source_basis 판단, supply_coordination의 우선순위 판단, plan agent의
+feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은, 지금 규칙 기반으로
+구현하더라도 `{판단값, 근거}` 형태의 공통 pydantic 모델을 반환하게 만든다. M7에서는
+이 스텁 함수의 내부 구현만 Gemini 구조화 출력 호출로 교체하고, 호출부(인터페이스)는
+바뀌지 않아야 한다.
 
 **3. DESIGN.md는 마일스톤이 끝날 때마다 그 자리에서 갱신한다(M8까지 몰아서 채우지
 않는다).** 각 마일스톤 완료 시 "진행 상황" 섹션에 해당 마일스톤에서 구현·검증한
@@ -71,68 +80,105 @@ Gemini 구조화 출력 호출로 교체하고, 호출부(인터페이스)는 �
   상황을 재현해, Lock 없이는 값이 틀리고 Lock을 걸면 정확함을 직접 입증.
 - DESIGN.md 갱신: "진행 상황"에 M0 요약 추가.
 
-### M1 — 핵심 메커니즘 1: forecast ↔ supply_coordination 라운드 누적 협상 (최소 골격)
-- `forecast`, `supply_coordination` 두 agent만 실물 구현. `analysis`는 하드코딩된
-  candidate를 주는 스텁으로 대체(진짜 analysis는 M3).
-- `capacity_pools`에 의도적으로 작은 값을 넣어 첫 제안이 즉시 수락되지 않게 강제.
-- 종료조건은 단순화 버전(변화폭 임계치 이하)만 — `forecast_reliability` 게이트는 M6.
-- `max_rounds` 소진 시 `escalation_records[]`에 기록 생성. validation 게이트는 아직 없음(M2).
-- forecast의 후보 선택 판단은 **공통 규칙 2**에 따라 `{판단값, 근거}` pydantic 스키마로
-  반환하는 규칙 기반 스텁으로 구현.
+### M1 — forecast(통합) → supply_coordination 최적화 배분 + 내부 되돌림 (최소 골격)
+- `forecast`(analysis 통합, 데이터 수집→데이터 소스 판단→모델 선택→시나리오
+  계산→후보 선택), `supply_coordination` 두 agent만 실물 구현. 데이터
+  수집·시나리오 계산은 하드코딩된 candidate를 반환하는 스텁으로 대체(실물
+  데이터/모델 로직을 어느 마일스톤에서 다룰지는 M3이 성립하지 않게 되며
+  생긴 공백 — 아래 M3 참고, 재배치 필요).
+- forecast의 후보 선택 판단은 **공통 규칙 2**에 따라 `{판단값, 근거}` pydantic
+  스키마로 반환하는 규칙 기반 스텁으로 구현.
+- 되돌림(핸드오프) 로직 — `suspected_cause`가 "데이터 소스 문제"/"모델 선택
+  문제" 둘 중 무엇이냐에 따라 재개 지점이 갈리는지 구현(원래 M3 범위였으나,
+  검증agent(M2)나 supply_coordination의 역방향 되돌림(M5) 같은 외부 트리거
+  없이도 forecast agent 내부 로직만으로 독립 테스트 가능해 M1로 흡수 —
+  candidate 선택의 판단3계층 분기와 같은 성격). 이력 누적이 아니라 현재값
+  덮어쓰기임을 유지(`candidates`/`selected`/`validation`은 매번 갱신, 이력은
+  `negotiation_log`).
+- supply_coordination은 forecast가 선택한 candidate 값을 받아 우선순위 점수 산출
+  (회사가 1개뿐이라 tier 1~4 경쟁 자체가 없음 — 실제 다회사 경쟁 로직은 M4) 후
+  `allocation_candidate`를 1개 생성하는 **단방향 최적화**만 구현한다. 라운드/
+  협상/escalation은 이 마일스톤 범위 밖이다 — GRAPH_FLOW.md "상호작용 세 가지
+  유형"의 라운드 누적형(협상)은 공급망계획agent가 infeasible을 보냈을 때만
+  열리는 예외 경로이고, 공급망계획agent 자체가 M5에서 구현되므로 이 예외
+  경로도 M5에서 다룬다.
 
 **검증**
-- 수렴 시나리오: capacity 제약으로 몇 라운드에 걸쳐 제안이 낮아지며 수렴 → `round_history`의
-  각 라운드 값이 실제로 달라지는지(서로의 판단에 영향을 줬는지) 확인.
-- 비수렴 시나리오: capacity를 극단적으로 작게 줘서 `max_rounds` 소진 시 `escalation_records`가
-  정확히 생성되는지 확인.
-- `negotiation_log`가 실제 라운드 진행 순서와 일치하는지 확인.
-- DESIGN.md 갱신: "진행 상황"에 M1 요약 추가, "검토 후 유지 확정"에 "capacity 제약 하
-  다회 협상이 실제로 제안값을 변화시킴을 확인" 기록.
+- forecast가 candidate를 선택하면 그 값 그대로 `allocation_candidate`가 1개
+  생성되는지 확인.
+- `suspected_cause: "모델 선택 문제"`/`"데이터 소스 문제"` 두 경우 각각 재개
+  지점이 정확히 갈리는지(호출 카운트로 확인 — "모델 선택 문제"는 데이터 수집
+  함수 재호출 없이 모델 선택부터, "데이터 소스 문제"는 데이터 수집부터).
+- `candidates`/`selected`/`validation`은 덮어써지지만 `negotiation_log`에는
+  이전 이력이 남는지.
+- `negotiation_log`에 candidate 선택 → `allocation_candidate` 생성 순서로
+  이벤트가 남는지 확인.
+- DESIGN.md 갱신: "진행 상황"에 M1 요약 추가.
 
-### M2 — 핵심 메커니즘 2: 검증 게이트 (interaction_protocol 기반 일반화 라우팅)
+### M2 — 핵심 메커니즘 2: 검증agent (interaction_protocol 기반 일반화, 라우팅 권한 없음)
 - 도메인 검증 agent 1개(예: `forecast_validation`)를 이벤트 트리거 워커풀로 구현.
-- M1에서 직접 주고받던 흐름을 "작성자 → 검증agent 큐 → (통과 시) 원래 목적지"로 변경하되,
-  **공통 규칙 1**에 따라 이 라우팅을 `interaction_protocol[]` 조회로 구현(edge 하드코딩 금지).
+- M1에서 직접 최적화 결과를 쓰던 흐름을 "작성agent → 검증agent 큐 → 판정"으로
+  바꾸되, **공통 규칙 1**에 따라 edge를 하드코딩하지 않고 `interaction_protocol[]`
+  조회로 구현.
+- 검증agent는 판정(`validation.status`)만 하고 라우팅은 안 함(GRAPH_FLOW.md
+  "검증agent" 참고):
+  - `passed`: 받는 agent가 워커풀 성격(스스로 pull)인지 조율 성격(push
+    필요)인지에 따라 push 여부 갈림 — M1에는 조율 성격 소비자
+    (`supply_coordination`)만 있어 이 분기는 실증 가능하지만, 워커풀 성격
+    소비자(`procurement_plan` 등)는 M5 전까지 없으므로 더미 role_tag로
+    단위 테스트.
+  - `flagged`: 레코드를 만든 작성agent의 `validation_result.{role_tag}`
+    채널로 push.
+  - `check_failed`: 검증agent가 재시도 후 사람에게 push.
 - 규칙 기반 판정만(LLM 판단은 M7, 단 **공통 규칙 2**에 따라 반환 스키마는 동일하게):
   capacity 총량 초과 여부, role_tag 쓰기 권한 여부. **대상 agent의 계산을 재현하지 않는
   원칙**을 지키는지 확인.
-- `passed`/`flagged`/`check_failed` 3분기, `repeat_escalation_threshold`는 이력을
-  훑어 그때그때 계산(별도 카운터 저장 안 함).
+- `repeat_escalation_threshold`는 검증agent가 아니라 `flagged`를 받은 작성agent가
+  이력을 훑어 그때그때 계산(별도 카운터 저장 안 함, 검증agent는 이 판단에
+  관여하지 않음).
 
 **검증**
-- 정상 케이스: 유효한 제안이 통과 후 정상 전달되는지.
-- `flagged` 케이스: capacity 초과 제안 → flagged → 재조정 → 재제출 → 최종 통과 재현.
+- 정상 케이스: 유효한 제안이 `passed`면 조율 성격 소비자(`supply_coordination`)
+  에게 push되는지.
+- `flagged` 케이스: capacity 초과 제안 → flagged → 작성agent(`forecast`)의
+  `validation_result.forecast` 채널로 push → 재조정 → 재제출 → 최종 통과 재현.
 - `repeat_escalation_threshold` 케이스: 같은 `routing_reason` 연속 발생 시 `max_rounds`
-  소진 전에 escalation이 트리거되는지(M1의 "라운드 소진" 경로와 구분되는지).
+  소진 전에 escalation이 트리거되는지(같은 edge의 `max_rounds` 소진 경로와
+  구분되는지, 그리고 이 판단이 검증agent가 아니라 작성agent 쪽에서 일어나는지) —
+  이 시점엔 실물 라운드형 edge가 아직 없으므로(M1은 단방향 최적화, 라운드형
+  edge는 M5) 바로 아래 "일반화 검증"과 같은 더미 edge로 exchanges/round_history를
+  합성해 확인한다.
 - `check_failed` 케이스: 검증agent 내부 예외 강제 발생 → 재시도 후 escalation 확인.
 - **일반화 검증**: `interaction_protocol[]`에 테스트용 더미 edge 항목 하나를 추가하는
-  것만으로(게이트 코드 수정 없이) 그 edge가 같은 게이트를 통과하는지 확인 — 코드
+  것만으로(검증agent 코드 수정 없이) 그 edge가 같은 흐름을 통과하는지 확인 — 코드
   변경 없이 설정 추가만으로 새 edge가 동작함을 증명.
-- DESIGN.md 갱신: "진행 상황"에 M2 요약, "검토 후 유지 확정"에 "검증 게이트는
-  interaction_protocol 기반 일반 라우팅으로 구현, edge 추가 시 코드 변경 불필요" 기록.
+- DESIGN.md 갱신: "진행 상황"에 M2 요약, "검토 후 유지 확정"에 "검증agent는
+  판정만 하고 라우팅은 각 agent 자신의 역할로 분리, edge 추가 시 코드 변경
+  불필요" 기록.
 
-### M3 — analysis ↔ forecast 핸드오프형 상호작용
-- `analysis` agent 실물 구현(M1 스텁 제거). 데이터는 로컬 고정 샘플로 시작(Kaggle Store
-  Item Demand 실연동은 M7).
-- `data_source_basis`/`model_selection` 판단은 규칙 기반 스텁(**공통 규칙 2** 적용,
-  LLM 교체는 M7).
-- 핸드오프 시 재개 지점: `suspected_cause`가 무엇이든(model_selection이든
-  data_source_basis든) **항상 데이터 수집 함수부터 재실행**하고, 캐싱은 두지 않는다
-  (현재 데이터 수집 비용이 낮아 캐싱 이득이 적다는 판단). `suspected_cause` 값은
-  기록용으로만 남기고 재개 지점 분기에는 사용하지 않는다.
-- 이력 누적이 아니라 현재값 덮어쓰기임을 유지(`candidates`/`validation`은 매번 갱신).
+### M3 — 성립 안 함(analysis agent가 별도로 존재하지 않음)
+analysis agent와 forecast agent가 하나로 통합되면서(2026-09-20, JOURNAL.md
+참고) "analysis ↔ forecast 핸드오프형 상호작용"이라는 이 마일스톤 자체가
+성립하지 않는다 — 되돌림은 이제 별도 agent 간 엣지가 아니라 통합된
+forecast agent 내부의 재실행 로직이다.
 
-**검증**
-- `suspected_cause: model_selection`과 `suspected_cause: data_source_basis` 두 경우
-  모두 데이터 수집 함수가 호출되는지(호출 카운트로 확인) — 분기 없이 항상 재실행됨을 증명.
-- `suspected_cause`가 `analysis_agents[i]`의 기록(또는 `negotiation_log`)에 값만
-  남고, 재실행 로직 자체에는 영향을 주지 않는지 확인.
-- `candidates`/`validation`은 덮어써지지만 `negotiation_log`에는 이전 이력이 남는지.
-- DESIGN.md 갱신: "진행 상황"에 M3 요약, "검토 후 유지 확정"에 "analysis 재실행은
-  suspected_cause와 무관하게 항상 데이터 수집부터, 캐싱 없음" 기록.
+**검토 결과**: 이 마일스톤이 검증하려던 핵심 내용(되돌림 시 재개 지점이
+`suspected_cause`에 따라 정확히 갈리는지, 이력이 덮어써지는지)은 M1
+범위로 흡수했다 — 핸드오프 자체가 검증agent(M2)나 supply_coordination의
+역방향 되돌림(M5) 같은 외부 트리거 없이도, forecast agent 내부 로직만으로
+독립적으로 테스트 가능하기 때문(candidate 선택의 판단3계층 분기와 같은
+성격).
+
+**흡수 안 된 부분(공백, 재배치 필요)**: M3에는 되돌림 검증 외에
+`data_source_basis`/`model_selection` 판단의 **실물** 구현(M1 스텁 제거,
+로컬 고정 샘플 데이터 사용)이라는 별개 범위가 있었는데, 이건 M1의
+"내부 재실행 로직 검증"과 성격이 달라(스텁이 아니라 실물 판단 로직
+자체를 만드는 일) 그대로 흡수하지 않았다. 이 실물 구현을 어느 마일스톤이
+맡을지(M1 확장 vs 새 마일스톤 vs M4 이후로 미룸)는 아직 정하지 않았다 —
+번호 재정렬과 함께 별도로 정리 필요.
 
 ### M4 — N개 회사로 확장 + 진짜 병행성 증명
-- `analysis`/`forecast` 쌍을 회사별 N개(`asyncio.create_task()`)로 생성 — LangGraph
+- `forecast`(analysis 통합) agent를 회사별 N개(`asyncio.create_task()`)로 생성 — LangGraph
   Send API 대신 asyncio를 택한 핵심 근거(스텝 동기화 없는 진짜 병행)를 여기서 증명.
 - 우선순위 tier 1(revenue_impact)·tier 3(aging 하한선)·tier 4(배분량 산출)만 구현,
   tier 2(forecast_reliability)는 SQLite가 필요하므로 M6까지 스텁(**공통 규칙 2** 적용).
@@ -153,29 +199,45 @@ Gemini 구조화 출력 호출로 교체하고, 호출부(인터페이스)는 �
 - **plan agent 간 직접 상호작용(미확정 사항)은 건드리지 않고, 반드시 supply_coordination
   경유로만 구현.** M2에서 만든 일반화 게이트 덕분에, 향후 이 상호작용을 열기로 결정하면
   `interaction_protocol`에 항목만 추가하면 됨(공통 규칙 1).
+- plan agent가 infeasible을 보내면 supply_coordination이 forecast로 역방향
+  되돌림을 연다(GRAPH_FLOW.md "상호작용 세 가지 유형" 참고, 핸드오프형) —
+  M1에서 구현한 되돌림 메커니즘(데이터 소스 문제/모델 선택 문제)을 그대로
+  재사용한다. 트리거 조건만 procurement_plan 등의 infeasible 응답으로
+  바뀔 뿐, 재실행 지점(데이터 소스 문제/모델 선택 문제 중 무엇인지)만
+  정해지면 된다 — 새 라운드/escalation 로직은 필요 없다. `repeat_escalation_threshold`는
+  이 엣지(핸드오프형, 라운드 없음)에는 해당 없음 — 여전히 라운드형인
+  `supply_coordination↔procurement_plan` 등에서만 쓰인다.
 
 **검증**
 - `required_stages`에서 빠진 plan agent가 전혀 호출되지 않는지(호출 카운트 0).
 - logistics_plan을 강제 infeasible 처리했을 때 사슬을 거치지 않고 hub로 바로 돌아오는지
   (hub-and-spoke가 chain이 아님을 증명).
-- 반복 infeasible로 `repeat_escalation_threshold`가 forecast/analysis/사람까지 확장되는
-  경로 재현 — M2의 헬퍼가 이 엣지에서도 재사용되는지(코드 수정 없이 동작하는지).
+- 반복 infeasible로 `supply_coordination↔procurement_plan`의
+  `repeat_escalation_threshold`가 트립돼 forecast로의 핸드오프(또는 사람
+  escalation)까지 확장되는 경로 재현 — `repeat_escalation_threshold` 자체는
+  이 라운드형 엣지에서만 계산되고, forecast로의 핸드오프는 트리거만 될 뿐
+  별도 카운트가 없는지 확인. M2의 헬퍼가 이 엣지에서도 재사용되는지(코드
+  수정 없이 동작하는지)도 함께 확인.
 - DESIGN.md 갱신: "진행 상황"에 M5 요약, "아직 결정 안 된 것"에 "plan agent 간 직접
   상호작용 여부 — M8에서 데이터 기반 판단 예정"이 유지되어 있는지 확인.
 
-### M6 — forecast_reliability 영속화 + 우선순위 tier 2 + 협상 종료조건 완성
+### M6 — forecast_reliability 영속화 + 우선순위 tier 2
 - SQLite 도입, walk-forward validation 구현.
-- forecast↔supply_coordination 종료조건을 "변화폭 임계치 이하 **+** forecast_reliability
-  게이트 통과"로 완성(M1 단순화 버전 대체). 우선순위 tier 2로 M4 스텁 제거.
+- 우선순위 tier 2로 M4 스텁 제거(STATE_SCHEMA.md "우선순위 구조" 참고 —
+  supply_coordination의 배분 우선순위 산출에 쓰임).
+- forecast_reliability 게이트를 실제로 어디에 붙일지는 **별도 확정 필요**
+  — 원래 전제였던 forecast↔supply_coordination 라운드 수렴조건이
+  무효화됐다(DESIGN.md "미구현/todo 필드" 참고). 이 마일스톤에서는
+  산출·영속화 로직만 구현하고, 적용 위치 결정은 뒤로 미룬다.
 
 **검증**
 - 프로세스를 두 번 실행해 두 번째가 저장된 점수를 재계산이 아니라 로드하는지(호출 카운트로 구분).
-- "변화폭은 임계치 이내이지만 reliability 게이트 미통과" 케이스에서 협상이 조기 종료되지
-  않는지(AND 결합 검증).
 - walk-forward 분할 로직을 알려진 기대값의 작은 시계열로 단위 테스트.
-- DESIGN.md 갱신: "진행 상황"에 M6 요약, "검토 후 유지 확정"에 "협상 종료조건은
-  변화폭+reliability AND 결합으로 확정" 기록, "미구현·todo 필드"에서 forecast_reliability
-  관련 항목 제거.
+- 우선순위 tier 2 적용 시 revenue_impact가 임계치 이내로 비슷한 경우에만
+  forecast_reliability로 순위가 조정되는지(tier 1이 확실히 갈리면 tier 2가
+  안 쓰이는지).
+- DESIGN.md 갱신: "진행 상황"에 M6 요약, "미구현·todo 필드"에서
+  forecast_reliability 산출/영속화 항목 제거(적용 위치 미정 항목은 유지).
 
 ### M7 — LLM 판단 계층 통합 + 실데이터 연동 강화
 - google-genai(Gemini) 구조화 출력을 판단③계층 중 ②(agent판단)가 필요한 지점에 연결:

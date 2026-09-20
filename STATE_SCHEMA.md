@@ -1,6 +1,6 @@
 # State 스키마
 
-State의 8개 최상위 필드 정의. 구현 중 실제로 이 스키마 자체가 바뀌면
+State의 7개 최상위 필드 정의. 구현 중 실제로 이 스키마 자체가 바뀌면
 (필드 추가/제거/형태 변경) 이 파일을 직접 고친다 — 바뀐 이유는
 JOURNAL.md에 남긴다. 설명은 한글, 실제 필드명/태그값(스키마 코드블록
 안)은 영어(snake_case).
@@ -8,10 +8,11 @@ JOURNAL.md에 남긴다. 설명은 한글, 실제 필드명/태그값(스키마 
 ## 전체 구조 요약
 
 ```
-analysis agent(회사별 1개, 총 N개, role_tag: analysis) — 지속 태스크
-        ↕  (신호 기반, 핸드오프형)
 forecast agent(회사별 1개, 총 N개, role_tag: forecast) — 지속 태스크
-        ↕  (신호 기반, 라운드 누적형)
+   (데이터 수집→데이터 소스 판단→모델 선택→시나리오 계산→후보 선택을
+    한 agent 내부 단계로 수행 — 원래 analysis/forecast 두 agent였으나
+    되돌림 지점이 "데이터 소스 문제"/"모델 선택 문제" 둘로 충분해 통합)
+        ↕  (신호 기반, 평소 정방향 최적화 / 예외 시에만 역방향 핸드오프)
 supply_coordination agent(1개, role_tag: supply_coordination) — 지속 태스크
    ↕procurement_plan   ↕production_plan   ↕logistics_plan  (각 1개, 지속 태스크)
    (hub-and-spoke — 셋 다 직접 연결, 사슬 아님. 순서는 의존관계에 따른
@@ -19,13 +20,14 @@ supply_coordination agent(1개, role_tag: supply_coordination) — 지속 태스
         ↓
 실제 조달/생산/배송 (그래프 노드 아님, 외부 경계 — sales_channel과 같은 성격)
 
-validation agent(들) — 일감은 이벤트 트리거·무기억 워커풀 방식으로 받지만,
-결과는 critical path를 막는 **게이트**(값이 다음 소비자에게 가기 전 항상
-거침, 상세는 GRAPH_FLOW.md "검증 게이트" 참고). human_manager(들) —
+validation agent(들) — 일감은 이벤트 트리거·무기억 워커풀 방식으로 받고,
+판정(`passed`/`flagged`/`check_failed`)만 State에 쓴다 — 라우팅 권한은
+없고, push 여부는 받는 agent 성격(워커풀=pull, 조율=push)에 따른
+기계적 규칙일 뿐이다(상세는 GRAPH_FLOW.md "검증agent" 참고). human_manager(들) —
 escalation 발생 시에만 반응, 지속 태스크 아님.
 
 문제 발생 시: 공급망계획agent → supply_coordination → (필요시) forecast/
-analysis/채널/사람 escalation — 어디까지 되돌릴지는 interaction_protocol이
+채널/사람 escalation — 어디까지 되돌릴지는 interaction_protocol이
 규정.
 ```
 
@@ -37,41 +39,54 @@ GRAPH_FLOW.md·AGENT_NODE_LIST.md 참고.
 
 ## 최상위 State 필드
 
-### 1. `analysis_agents[]`
-개별 analysis agent 인스턴스(회사별 1개, 총 N개 — asyncio 지속 태스크로
-독립 실행).
+### 1. `forecast_agents[]`
+개별 forecast agent 인스턴스(회사별 1개, 총 N개 — asyncio 지속 태스크로
+독립 실행). 원래 analysis agent와 forecast agent로 나뉘어 있었으나 하나로
+통합했다 — 분리 이유였던 "되돌림 지점이 다르면 agent도 분리"가, 되돌림
+지점을 재검토한 결과 두 값("데이터 소스 문제"/"모델 선택 문제")으로
+충분해져 더 이상 성립하지 않는다(아래 "되돌림" 참고).
 ```
-{ agent_id, role_tag: "analysis",
+{ agent_id, role_tag: "forecast",
   data_source_basis: "own_company" | "similar_companies",
   model_selection,
   candidates: [{scenario, value, confidence, cost_estimate}],
-  validation: { status: "passed" | "flagged" | "check_failed", suspected_cause, rationale, ts, validator_role_tag }
-}
-```
-후보(a/b/c) 선택은 forecast agent 쪽에서 판단3계층 적용 — 신뢰구간이
-좁으면 규칙(①)으로 자동 채택, 비용-리스크 트레이드오프가 얽히면
-agent판단(②), 통계와 비즈니스 판단이 충돌하면 사람 escalation(③).
-`data_source_basis`는 자사 과거 실적이 없거나 부적합할 때(신제품·신규
-프로모션 등) 유사 업종/유사 사례(외부 데이터)로 대체할지를 analysis agent가
-판단한 결과 — "회사 단위 인스턴스"가 곧 "그 회사 데이터만 참고"를 뜻하지
-않음.
-
-### 2. `forecast_agents[]`
-개별 forecast agent 인스턴스(회사별 1개, 총 N개, 같은 agent_id로
-analysis_agents와 짝). analysis와는 **핸드오프형**(같은 값을 다듬는 게
-아니라 재실행 지시) 관계 — 자세한 상호작용 유형은 GRAPH_FLOW.md 참고.
-```
-{ agent_id, role_tag: "forecast", selected,
+  selected,
   selection_basis: "rule" | "agent_judgment" | "human",
-  current_round, round_history: [{round, proposed, response}],
   validation: { status: "passed" | "flagged" | "check_failed", suspected_cause, rationale, ts, validator_role_tag }
 }
 ```
-`validation`은 **현재값만** 유지(이력
-전체는 아래 `negotiation_log`에 쌓임 — Step1 원칙3: 판단용 현재값과 기록용
-스냅샷 분리).
+내부 단계(순서대로, AGENT_NODE_LIST.md 참고): 데이터 수집(함수) →
+**데이터 소스 판단**(자사 이력 부족/부적합 시 유사 업종·사례로 대체할지
+결정) → **모델 선택**(판단, 계절성/간헐수요 등에 따라 통계기법 결정) →
+시나리오(a/b/c) 계산(함수, 선택된 모델로 파라미터만 다르게) → **후보
+선택**(판단, 판단3계층 적용 — 신뢰구간이 좁으면 규칙①로 자동 채택,
+비용-리스크 트레이드오프가 얽히면 agent판단②, 통계와 비즈니스 판단이
+충돌하면 사람 escalation③).
 
-### 3. `capacity_pools[]`
+**되돌림(핸드오프)**: 같은 값을 다듬는 게 아니라 **재실행 지시** —
+되돌리면 이전 결과를 이어서 다듬는 게 아니라 새로 계산해서 덮어씀
+(현재값만 유지, 이력은 `negotiation_log`). `validation.suspected_cause`는
+두 값만 쓴다:
+- **"데이터 소스 문제"**(자사 이력으로 부족·부적합) → 데이터 수집부터
+  재실행
+- **"모델 선택 문제"** → 모델 선택 단계부터 재실행(수집된 데이터는
+  재사용, 이후 시나리오 계산·후보 선택은 전부 다시 돎)
+
+"후보 선택만 다시"라는 세 번째 값은 두지 않는다 — 모델 선택부터 다시
+돌리면 새 후보가 나와 후보 선택도 자연히 다시 이뤄지므로, 별도 재개
+지점 없이 이 경로로 커버된다. supply_coordination→forecast(역방향,
+예외 — GRAPH_FLOW.md 엣지 표 참고)의 핸드오프도 같은 메커니즘을 그대로
+쓴다 — `suspected_cause`는 위 두 값 중 하나로만 온다.
+
+`validation`은 **현재값만** 유지(이력 전체는 `negotiation_log`에 쌓임 —
+Step1 원칙3: 판단용 현재값과 기록용 스냅샷 분리).
+
+**"회사 단위 인스턴스"가 곧 "그 회사 데이터만 참고"를 뜻하지 않음** —
+`data_source_basis`는 자사 과거 실적이 없거나 부적합할 때(신제품·신규
+프로모션 등) 유사 업종/유사 사례(외부 데이터)로 대체할지를 이 agent가
+판단한 결과다.
+
+### 2. `capacity_pools[]`
 생산capacity를 "계좌"처럼 관리. 공유풀/전용풀 둘 다 표현 가능.
 ```
 { pool_id, total_capacity, remaining_capacity,  # 증감 가능
@@ -80,10 +95,17 @@ analysis_agents와 짝). analysis와는 **핸드오프형**(같은 값을 다듬
 }
 ```
 
-### 4. `allocation_candidates[]` (현재 라운드)
+### 3. `allocation_candidates[]` (현재 라운드)
 supply_coordination agent가 만드는 후보 배분안. "M개 agent"가 아니라 "1개
 agent가 만드는 M개 후보"로 처리. 우선순위는 4단 구조로 산출(아래 "우선순위
 구조" 참고).
+
+candidate 자체(`allocation`/`cost`/`risk` 등)의 생성은 forecast의 선택값을
+받아 우선순위 점수를 산출하는 **단방향 최적화 결과**이지 협상이 아니다 —
+라운드가 쌓이는 건 아래 `exchanges[]`(supply_coordination↔공급망계획agent
+간 라운드)뿐이며, `infeasible` 응답이 왔을 때만 라운드가 이어진다.
+`feasible`/`infeasible` 비율은 procurement_plan 등의 확률분포 파라미터
+(평균/표준편차)에 따라 달라지며 지금은 확정하지 않는다.
 
 선정된 안(`status: "selected"`)에는 공급망계획agent(procurement_plan/
 production_plan/logistics_plan)와의 집행 교환 내역을 내장한다 — 별도 배열을
@@ -116,6 +138,13 @@ supply_coordination agent가 procurement_plan·production_plan·logistics_plan
   ]
 }
 ```
+
+`response_status: "infeasible"`은 "요청대로는 아예 불가능하다"만 뜻하지
+않는다 — procurement_plan 등이 공급처·시점·조달량을 판단하는 과정에서
+자연히 나오는 "요청과 다르지만 실제로 더 정확하거나 나은 대안이 있다"는
+판단도 infeasible로 분류한다. 이건 원래 그 agent가 하는 판단(어디서/
+언제/얼마나)의 부산물이지, infeasible 여부를 가르기 위한 별도 계산
+단계가 아니다.
 
 ## 우선순위 구조 (자원 배분 시 사용)
 
@@ -154,8 +183,8 @@ validation**(과거 데이터를 시간순으로 잘라, 그 시점까지의 데
 
 ## 동시성 모델 (asyncio)
 
-- **구조**: analysis/forecast(회사별, 총 N개씩)와 supply_coordination/
-  공급망계획agent(각 1개)를 각각 독립된 **asyncio 태스크**로 실행 — Docker/
+- **구조**: forecast(회사별, 총 N개)와 supply_coordination/공급망계획agent
+  (각 1개)를 각각 독립된 **asyncio 태스크**로 실행 — Docker/
   Redis 같은 별도 프로세스·네트워크 없이, 파이썬 프로세스 하나 안에서
   이벤트루프가 태스크들을 오가며 진행(cooperative multitasking)
 - **왜 Send API(LangGraph)가 아닌지**: Send API는 "한 스텝 안에서 N개로
@@ -169,10 +198,15 @@ validation**(과거 데이터를 시간순으로 잘라, 그 시점까지의 데
   **같은 프로세스 안의 신호**일 뿐(기록은 여전히 State/negotiation_log가 담당,
   큐는 "초인종" 역할만). **값 쓰기와 push는 항상 짝** — `set_field`가 값
   기록과 동시에 큐에 push하도록 구현(업무 로직이 매번 기억할 필요 없게)
-- **검증 게이트**: 값을 쓴 agent는 원래 의도한 다음 agent 큐가 아니라
-  **검증agent 큐에만 push** — 검증 통과 후에야 검증agent가 원래 목적지로
-  push(상세는 GRAPH_FLOW.md "검증 게이트" 참고). 그래서 각 지속 태스크는
-  기존 협상 채널 외에 자기 `validation_result.{role_tag}` 채널도 지켜봐야 함
+- **검증agent**: 값을 쓴 agent는 원래 의도한 다음 agent 큐가 아니라
+  **검증agent 큐에만 push** — 검증agent는 판정(`validation.status`)만
+  State에 쓰고, 라우팅 판단은 안 한다. `flagged`/`check_failed`는 항상
+  push. `passed`는 받는 agent 성격에 따라 갈린다 — 워커풀 성격(여러
+  회사 요청을 안건 단위로 처리하는 `procurement_plan` 등)이면 push
+  없음(값 쓰기와 push가 항상 짝이라는 원칙의 예외, 그 agent가 스스로
+  pull), 조율 성격(`supply_coordination`)이면 push함(상세는
+  GRAPH_FLOW.md "검증agent" 참고). 그래서 각 지속 태스크는 기존
+  협상 채널 외에 자기 `validation_result.{role_tag}` 채널도 지켜봐야 함
 - **State 접근 통제**: 모든 State 읽기/쓰기는 `role_permissions`를 검사하는
   wrapper 함수(예: `get_field(role_tag, field_path)`)를 통해서만 — 이렇게
   강제해야 코드가 몰래 다른 role의 영역을 직접 건드리는 걸 런타임에 막을 수 있음
@@ -183,7 +217,7 @@ validation**(과거 데이터를 시간순으로 잘라, 그 시점까지의 데
   물리적으로 분리된 서버와 통신하게 확장 가능 — agent 로직은 안 건드리고
   큐 구현체만 교체
 
-### 5. `negotiation_log[]`
+### 4. `negotiation_log[]`
 전체 조정 과정을 취합하는 로그. `exchanges`가 "한 역할과의 요청-응답 쌍"을
 담는 개별 트랜잭션이라면, 이건 조달·생산·배송처럼 **서로 다른 역할들의
 이벤트가 뒤섞여 시간순으로 쌓이는 전체 스트림**(DB의 트랜잭션 로그와 같은
@@ -194,37 +228,57 @@ validation**(과거 데이터를 시간순으로 잘라, 그 시점까지의 데
 데이터, LangSmith는 사람이 보는 디버깅용)
 
 검증 이벤트도 별도 필드 없이 여기에 함께 쌓임 — "통과"/"이상감지" 각각의
-현재값은 해당 record(`analysis_agents[i].validation` 등)에 있고, 그
+현재값은 해당 record(`forecast_agents[i].validation` 등)에 있고, 그
 이력(언제 통과였다가 언제 번복됐는지)은 이 로그를 시간순으로 읽으면 됨.
 ```
 { role_tag, event, round, ts }
 ```
 
-### 6. `interaction_protocol[]`
+### 5. `interaction_protocol[]`
 agent 역할 간 상호작용 규칙(동역학). `scope`는 인스턴스 나열이 아니라 역할
 태그.
 ```
-{ edge: "forecast<->supply_coordination", max_rounds: 3,  # 타임아웃 안전장치
+{ edge: "supply_coordination<->procurement_plan", max_rounds: 3,  # 타임아웃 안전장치
   repeat_escalation_threshold: 2,  # 같은 사유(routing_reason 등)가 이 횟수만큼
                                     # 연속 반복되면 max_rounds 소진을 안 기다리고
                                     # "구조적으로 안 풀림"으로 간주해 상위로 확장
-  scope: ["forecast", "supply_coordination"],
+  scope: ["supply_coordination", "procurement_plan"],
   escalation_trigger, escalation_target, escalation_kind: "rule" | "agent_judgment" | "human",
   source: "initial_design" | "promoted_from_trace" | "external_benchmark",
   last_updated
 }
 ```
 
-**갱신 경로 (파인튜닝 아님 — LLM 가중치는 그대로, 이 참고자료만 바뀜)**:
+**forecast<->supply_coordination는 방향에 따라 성격이 다르지만**(정방향은
+단방향 전달=최적화, 역방향은 공급망계획agent의 infeasible 신호로 여는
+핸드오프=재실행 지시 — GRAPH_FLOW.md 엣지 표 참고), **두 방향 모두
+라운드가 쌓이지 않아 `max_rounds`가 필요 없다** — 그래서 정방향/역방향을
+나누지 않고 레코드 하나를 함께 쓴다:
+```
+{ edge: "forecast<->supply_coordination", repeat_escalation_threshold: 2,
+  scope: ["forecast", "supply_coordination"],
+  escalation_trigger, escalation_target, escalation_kind,
+  source: "initial_design", last_updated }
+  # max_rounds 없음: 정방향(최적화)·역방향(핸드오프) 모두 라운드 개념이
+  # 없다. repeat_escalation_threshold/escalation_*는 검증agent의 flagged
+  # 되돌림 경로(GRAPH_FLOW.md "검증agent" 참고)가 두 방향 모두에 동일하게
+  # 적용되므로 유지한다
+```
+다른 엣지(supply_coordination↔procurement_plan 등)는 요청→응답→
+(infeasible 시) 라운드 연장이 실제로 있어 위 첫 예시처럼 `max_rounds`를
+쓴다. `InteractionProtocol` pydantic 모델에서 `max_rounds`를 필수에서
+선택(Optional)으로 바꿀지는 이 구분을 실제로 구현하는 마일스톤에서
+정한다.
+
+**갱신 경로**:
 - `promoted_from_trace`(내부): `negotiation_log`(이벤트 로그)를 process
   mining 라이브러리(pm4py 등)로 분석해 패턴(예: "이 edge는 보통 N라운드
   안에 수렴")을 발견 → `max_rounds` 등 값 조정
 - `external_benchmark`(외부): 업계 벤치마크 자료(유사 협상/거래의 평균
   소요 등)를 초기값/조정 근거로 사용
-- 둘 다 규칙(①) 계층의 기준값만 바꿈 — agent의 판단 능력 자체가 좋아지는
-  게 아니라, 판단에 쓰는 참고자료가 갱신되는 것
+- 둘 다 규칙(①) 계층의 기준값만 바꿈
 
-### 7. `role_permissions[]`
+### 6. `role_permissions[]`
 State 필드 단위 접근권한(agent 간, Unity Catalog의 시스템 접근통제와는 다른
 층). r/w만 사용(x는 불필요), 화이트리스트 방식 — "전체 접근"은 기본값이
 아니라 예외적으로만 명시.
@@ -234,7 +288,7 @@ State 필드 단위 접근권한(agent 간, Unity Catalog의 시스템 접근통
 예: procurement_plan agent는 `capacity_pools`를 직접 못 읽고,
 `allocation_candidates[selected].exchanges`에서 자기 `role_tag`에 해당하는 항목만 r/w.
 
-### 8. `escalation_records[]`
+### 7. `escalation_records[]`
 사람(human_manager) 개입 기록.
 ```
 { trigger_edge, reason, target_role: "human_manager", status, resolution }
@@ -254,7 +308,7 @@ validation agent가 왜 틀렸는지 자체를 신뢰할 수 없는 상태이므
 
 ## 데이터 소스 (mock 대신)
 
-- **analysis agent 입력**: Kaggle Store Item Demand — 실데이터. 자사
+- **forecast agent 입력(데이터 수집 단계)**: Kaggle Store Item Demand — 실데이터. 자사
   이력이 없거나 부적합하면(`data_source_basis: "similar_companies"`) 유사
   업종/유사 사례 데이터로 보강
 - **logistics_plan agent 응답값**(리드타임/지연 패턴): SynDelay — 실데이터로
@@ -271,9 +325,6 @@ validation agent가 왜 틀렸는지 자체를 신뢰할 수 없는 상태이므
 
 ## 아직 정하지 않은 것
 
-- 공급망계획agent 간(procurement_plan↔production_plan 등) 상호작용까지 다회
-  협상으로 갈지 — 지금은 supply_coordination agent를 경유하는 것으로
-  가정, 구조상 확장 가능하게만 열어둠
 - 그래프 흐름(엣지, self-loop, 종료조건, 인스턴스 패턴 기준)은
   GRAPH_FLOW.md 참고 — 실행층이 실제 agent가 되면 `execution_records[]`
   등 새 최상위 필드로 분리 예정(지금은 외부 경계라 해당 없음)

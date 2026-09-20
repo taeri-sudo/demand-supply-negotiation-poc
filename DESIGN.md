@@ -14,30 +14,29 @@ demand-supply-negotiation-poc의 **현재 구현 상태**를 담는 문서. Stat
   `asyncio.Lock` 보호 헬퍼(`adjust_capacity_pool`) 구현. agent 로직은 아직
   없음(pytest 8건 — 권한 거부, set_field-큐 push 짝, 중첩 field_path
   읽기/쓰기, 와일드카드 권한, Lock 유무에 따른 동시성 경쟁 재현/해결).
-- **M1 (forecast↔supply_coordination 라운드 협상, MILESTONES.md M1)**:
-  `src/sop/judgment.py`에 판단 스텁 공통 반환 스키마 `StructuredJudgment`
-  ({judgment, reasoning}) 정의(공통 규칙 2 — M7에서 LLM 구조화 출력으로 내부만
-  교체될 지점 전부가 이 스키마를 공유). `src/sop/analysis_stub.py`는 analysis
-  agent 실물(M3) 전까지 하드코딩된 a/b/c candidate를 반환하는 스텁.
-  `src/sop/forecast_candidate_selection.py`의 `select_forecast_candidate`는 그
-  candidate 중 confidence가 가장 높은 것을 규칙 기반으로 선택해
-  `StructuredJudgment`로 반환. `src/sop/forecast_supply_round.py`에는:
-  `supply_coordination_respond`(remaining_capacity와 proposed만 보고
-  accepted/counter를 정하는 순수 함수 — 회사 1개뿐이라 배분 대안이 없어 이번
-  마일스톤은 agent 판단이 아님), `forecast_next_proposal`(counter를 받으면
-  격차의 50%만 좁혀 재제안, `StructuredJudgment` 반환), `run_forecast_supply_round`
-  (라운드 루프 — `forecast_agents[i].round_history`에 매 라운드 누적,
-  `interaction_protocol`의 `max_rounds`를 안전장치로 사용, 수렴조건은 직전 대비
-  proposed 변화율 < 10%(GRAPH_FLOW.md 원래 정의의 축소판 — 상세는 아래 "미구현"
-  참고), max_rounds 소진 시 `escalation_records`에 기록), `run_forecast_select_and_round`
-  (candidate 선택 → `forecast_agents[i].selected`/`selection_basis` 기록 →
-  라운드 루프까지 잇는 상위 진입점). pytest 5건(candidate 선택 규칙, 수렴/max_rounds
-  소진 escalation/즉시 accepted, 선택→협상 통합 흐름). `capacity_pools.remaining_capacity`를
-  최초 제안보다 작게 둔 상태에서 `run_forecast_supply_round`를 돌리면, 매
-  라운드 `forecast_agents[i].round_history`에 기록되는 `proposed` 값이 실제로
-  달라지며 좁혀짐을 확인(예: remaining=70일 때 100→85→77.5) — "서로의 판단에
-  실제로 영향을 주는 다회 협상"이라는 프로젝트 핵심 목표(CLAUDE.md)가 최소
-  골격 수준에서 성립함을 pytest로 확인.
+- **M1 (MILESTONES.md M1 — 2026-09-20 설계 재정의, 코드는 아직 구설계
+  그대로라 재작업 필요)**: 최초 구현은 forecast↔supply_coordination을
+  라운드 협상(격차 50% 좁히기, 변화율 수렴조건)으로 다뤘으나, 이후 설계
+  검토로 이 메커니즘 자체가 무효화됐다(JOURNAL.md 2026-09-16/2026-09-20
+  참고). `src/sop/forecast_supply_round.py` 등 M1 코드는 여전히 이 옛
+  설계를 그대로 구현하고 있어 재작업이 필요하다.
+
+  현재 설계(STATE_SCHEMA.md/AGENT_NODE_LIST.md/GRAPH_FLOW.md에 이미 반영):
+  - analysis agent와 forecast agent를 하나(`forecast_agents[]`, role_tag:
+    `forecast`)로 통합 — 데이터 수집(함수) → 데이터 소스 판단 → 모델
+    선택 → 시나리오 계산(함수) → 후보 선택, 전부 한 agent 내부 단계.
+  - 되돌림(핸드오프)은 `suspected_cause` 두 값만: "데이터 소스 문제"
+    (데이터 수집부터 재실행)/"모델 선택 문제"(모델 선택부터 재실행).
+  - `forecast → supply_coordination`(정방향, 평소): 단방향 전달(최적화)
+    — 후보 선택값을 supply_coordination이 우선순위 점수 산출 후
+    `allocation_candidate`로 생성, 라운드 없음.
+  - `supply_coordination → forecast`(역방향, 예외): 공급망계획agent의
+    infeasible 신호로만 열리는 핸드오프(재실행 지시) — 라운드 협상이
+    아니라, 위 되돌림 메커니즘을 그대로 재사용.
+  - 검증agent는 판정만 하고 라우팅은 안 함(관찰형) — `passed`의 push
+    여부는 받는 agent 성격에 따라 갈림(워커풀 성격 `procurement_plan`
+    등은 스스로 pull, 조율 성격 `supply_coordination`은 push), `flagged`는
+    항상 작성agent에게 push.
 
 ## 검토 후 현재 구조 유지로 확정
 
@@ -51,16 +50,31 @@ demand-supply-negotiation-poc의 **현재 구현 상태**를 담는 문서. Stat
   근거를 따라가며 재확인됨. 사이클의 **시작**은 계획 주기에 묶되, 사이클이
   도는 동안의 값 변경 전파(값 쓰기 시 즉시 큐 신호)는 그대로 이벤트
   반응형을 유지 — 이건 구현으로 바꿀 수 있는 선택이 아니라 도메인 자체의
-  성질이라 그대로 채택. 다만 실무 전환 시 주기 시작 시점에 forecast/analysis
+  성질이라 그대로 채택. 다만 실무 전환 시 주기 시작 시점에 forecast
   태스크가 한꺼번에 몰릴 수 있어(N개 회사가 같은 시각에 트리거), 현재
-  validation agent에만 적용한 워커풀 패턴을 forecast/analysis에도 적용할
+  validation agent에만 적용한 워커풀 패턴을 forecast에도 적용할
   여지를 열어둔다.
 
 ## 아직 결정 안 된 것 / 다음에 확인할 것
 
-(TBD — 예: 공급망계획agent 간 직접 상호작용 여부, 재무(9.0) 포함 여부 등
-STEP2_SUMMARY.md에 이미 미정으로 남아있는 것들이 여기로 옮겨올 수 있음)
+(TBD — 예: 재무(9.0) 포함 여부 등 STEP2_SUMMARY.md에 이미 미정으로
+남아있는 것들이 여기로 옮겨올 수 있음)
 
+- **forecast_agents의 인스턴스 단위 재설계 가능성 — 회사
+  단위에서 (회사, item) 단위로**: 지금은 "회사 1개 = 인스턴스 1개"
+  (MILESTONES.md M1의 "회사 1개"/M4의 "N개 회사 확장" 등이 전부 이 전제)
+  인데, 한 회사가 여러 item(예: 라면과 과자)을 동시에 주문하는 경우를
+  표현할 수 없다는 구조적 한계가 발견됨. 아직 구현/문서 반영 전 —
+  확정되면 MILESTONES.md의 인스턴스 단위를 전제한 서술을 전부 재검토해야
+  함(재검토 트리거로 남겨둠). 별도 세션에서 STATE_SCHEMA.md부터 재설계
+  예정. 상세 논거는 JOURNAL.md 2026-09-19 참고.
+- **procurement_plan이 여러 forecast 요청을 묶어 처리하는 게 나은지**: 여러
+  forecast agent의 요청을 procurement_plan이 묶어서 처리(대량구매 단가 등)
+  하는 게 나은지는 지금 넣지 않는다 — AGENT_NODE_LIST.md 설계(안건별 개별
+  처리)와 다른 새 판단 로직이 필요하고 비용도 드는 일이라, GRAPH_FLOW.md의
+  `promoted_from_trace` 승격 경로(공급망계획agent 간 직접 상호작용 미정과
+  같은 방식)로 미룬다. `negotiation_log`에서 같은 시기 여러 요청이 자주
+  겹치는 패턴이 실제로 드러나면 그때 추가할 후보로만 기록해둔다.
 - **role_permissions에 `w`만 있고 대응하는 `r`이 없는 조합을 막을지**:
   지금 코드(`access.py`)는 이 조합을 허용한다. `negotiation_log`/
   `escalation_records`처럼 "기록용 스트림"에 이벤트를 append만 하고, 판단은
@@ -76,55 +90,30 @@ STEP2_SUMMARY.md에 이미 미정으로 남아있는 것들이 여기로 옮겨�
   agent마다 인덱스 탐색을 직접 하게 돼 있음. M1~M5에서 이 탐색이
   반복되는 정도를 보고 헬퍼 추가 여부 재검토(wrapper 자체는 안 바꿈).
   배경은 JOURNAL.md 2026-09-15 참고.
-- **capacity_pools 동시 읽기에 Lock을 걸지**: M1(`forecast_supply_round.py`)의
-  `supply_coordination_respond`는 `capacity_pools`를 Lock 없이 읽기만
-  한다 — 회사가 1개뿐이라 두 태스크가 같은 remaining_capacity를 동시에 보고
-  둘 다 accepted로 착각할 여지가 없기 때문. 회사가 여러 개로 늘어나는
-  마일스톤에서는 "여러 forecast가 동시에 같은 pool의 remaining_capacity를
-  읽고 판단"하는 상황이 생기므로, 그때 read 구간까지 Lock으로 감쌀지
-  (판단 자체가 아니라 판단에 쓰는 스냅샷의 일관성 문제) 재검토 필요.
-  배경은 JOURNAL.md 2026-09-16 참고.
-- **수렴한 협상의 최종 합의 수량을 State 어디에 남길지**: M1
-  `run_forecast_supply_round`는 수렴 시 최종 수량(예: 77.5)을 함수
-  반환값으로만 넘기고 State 어디에도 쓰지 않는다 — `round_history`의
-  마지막 항목은 그 수량이 아니라 직전 counter 응답(예: 70)을 담고 있어,
-  반환값을 안 받으면 그 수량 자체가 유실된다. 지금은 이 값을 받는
-  소비자(예: allocation_candidates 생성)가 아직 없어 저장 위치를 정하지
-  않았다 — `forecast_agents[i].selected`에 넣을지, `round_history`에 마지막
-  라운드로 하나 더 append할지는 그 소비자가 생기는 마일스톤에서 정한다.
-- **수렴값이 remaining_capacity를 초과할 수 있음**: M1 수렴조건(직전 대비
-  proposed 변화율 < 10%)은 forecast 자신의 제안이 더 이상 크게 안 바뀌는지만
-  보고, supply_coordination이 그 값을 실제로 accepted했는지는 보지 않는다.
-  그 결과 수렴된 최종값이 remaining_capacity를 초과할 수 있다(예:
-  remaining=70인데 최종 수렴값 77.5 — `test_negotiation_converges_within_max_rounds`에서
-  라운드 2 응답도 여전히 counter(70)인 상태로 77.5가 수렴값이 됨). 위
-  "최종 합의 수량을 State 어디에 남길지"와는 별개 문제 — 저장 위치를
-  정해도 그 값 자체가 remaining_capacity 초과일 수 있다는 게 핵심이다.
-  GRAPH_FLOW.md 원래 종료조건(변화폭+forecast_reliability 게이트, M6)이
-  붙어도 "제안 쪽 변화만 보고 상대 수락 여부는 안 본다"는 이 문제 자체는
-  안 풀릴 수 있음. 이 수렴값을 읽는 소비자(예: allocation_candidates 생성)가
-  생기기 전에, capacity 상한을 다시 확인하는 절차를 수렴 로직에 넣을지
-  결정해야 한다.
-- **candidate 선택의 판단3계층 조건 분기 미구현**: STATE_SCHEMA.md는 forecast의
-  candidate 선택을 "신뢰구간이 좁으면 규칙(①), 비용-리스크 트레이드오프가
-  얽히면 agent판단(②), 통계와 비즈니스 판단이 충돌하면 사람(③)"으로 나누지만,
-  `select_forecast_candidate`(`forecast_candidate_selection.py`)는 이 조건
-  판정 없이 confidence 최댓값을 항상 규칙(①)으로 채택한다. "신뢰구간이
-  좁다"를 무엇으로 판정할지(예: candidate 간 confidence 격차, 표준편차 등)
-  자체가 아직 미정이라 조건 분기를 뒤로 미뤘다 — ②/③ 분기 조건과 함께
-  다음 마일스톤에서 정한다.
+- **candidate 선택의 판단3계층 조건 분기 미구현**: STATE_SCHEMA.md는
+  forecast agent의 (통합된 내부 단계 중) 후보 선택을 "신뢰구간이 좁으면
+  규칙(①), 비용-리스크 트레이드오프가 얽히면 agent판단(②), 통계와
+  비즈니스 판단이 충돌하면 사람(③)"으로 나누지만, `select_forecast_candidate`
+  (`forecast_candidate_selection.py`)는 이 조건 판정 없이 confidence
+  최댓값을 항상 규칙(①)으로 채택한다. "신뢰구간이 좁다"를 무엇으로
+  판정할지(예: candidate 간 confidence 격차, 표준편차 등) 자체가 아직
+  미정이라 조건 분기를 뒤로 미뤘다 — ②/③ 분기 조건과 함께 다음
+  마일스톤에서 정한다.
 
 ## 미구현 / todo 필드
 
 State/설계에는 자리가 있지만 아직 실제 로직이 안 붙은 부분.
 
-- **forecast_reliability 신뢰도 게이트**: GRAPH_FLOW.md 엣지 표의
-  forecast↔supply_coordination 수렴조건은 "변화폭 임계치 이하 **+**
-  forecast_reliability 신뢰도 게이트 통과"이지만, walk-forward validation과
-  SQLite 영속화(STATE_SCHEMA.md "forecast_reliability 산출과 저장")가 아직
-  없어 M1(`src/sop/forecast_supply_round.py`)은 변화율 조건만으로 수렴을 판정한다.
-  영속화가 붙으면 `run_forecast_supply_round`의 수렴 분기에 게이트를
-  추가해야 함(M6, MILESTONES.md 참고).
+- **forecast_reliability 신뢰도 게이트**: 원래 forecast↔supply_coordination의
+  수렴조건("변화폭 임계치 이하 **+** forecast_reliability 게이트 통과")에
+  붙는 걸로 전제했으나, 그 엣지 성격이 바뀌면서(forecast→supply_coordination은
+  라운드 없는 단방향 최적화, supply_coordination→forecast는 핸드오프 —
+  GRAPH_FLOW.md 참고) 이 게이트가 정확히 어디에 붙어야 하는지 재정의가
+  필요하다. forecast_reliability 자체는 우선순위 구조 tier 2(STATE_SCHEMA.md
+  "우선순위 구조" 참고 — supply_coordination의 배분 우선순위 산출에 쓰임)로는
+  여전히 유효해 보이지만, walk-forward validation과 SQLite 영속화
+  (STATE_SCHEMA.md "forecast_reliability 산출과 저장")가 아직 없어 어느
+  쪽이든 M6 전까지는 구현되지 않는다(MILESTONES.md M6 참고).
 
 ## 확장 지점
 
