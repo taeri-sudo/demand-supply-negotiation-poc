@@ -191,3 +191,58 @@ infeasible을 보냈을 때만)는 analysis+forecast 통합 시 만든 핸드오
 수렴조건, capacity 동시읽기 Lock 여부, 수렴값 저장 위치 등)의 전제가
 사라짐 — 관련 JOURNAL 항목(2026-09-16 두 건)에 무효화 표시를 남기고,
 DESIGN.md M1 항목도 재작성했다.
+
+---
+
+## 2026-09-21 — M1 코드를 정방향/역방향 분리 설계에 맞춰 리팩터링
+
+2026-09-20에 문서만 정정하고 코드는 그대로 남겨뒀던 라운드 협상 로직
+(`forecast_supply_round.py`)을 실제로 걷어내고, `forecast_supply_allocation.py`
+(candidate 선택 → `allocation_candidate` 1개 생성, 단방향)로 교체했다.
+
+**capacity_pools/interaction_protocol 미참조를 assert가 아니라 권한
+누락으로 증명**: 새 코드가 이 두 필드를 더 이상 안 읽는다는 걸 테스트로
+확인할 때, "capacity_pools를 안 읽었다"는 식의 소극적 assert 대신, 테스트
+fixture의 `role_permissions`에서 이 두 필드에 대한 권한 자체를 아예
+안 줬다 — 코드가 실수로라도 참조하면 `PermissionDenied`로 테스트가
+즉시 실패하므로, "참조 안 함"을 더 강하게 보장한다.
+
+**analysis+forecast 스키마 통합은 이번에 같이 안 건드림**: 리팩터링
+중 `state.py`가 아직 `AnalysisAgentRecord`/`analysis_agents`를 그대로
+갖고 있고 `ForecastAgentRecord`에 라운드 전제 필드(`round_history` 등)가
+남아있는 걸 발견했으나, 이 스키마 통합은 M1(candidate 선택→배분 생성)
+범위보다 크다 — 되돌림(핸드오프)의 실제 재실행 대상인 데이터 수집·모델
+선택 로직 자체가 아직 스텁도 없어서(MILESTONES.md M3 공백), 스키마만
+먼저 바꾸면 그 필드를 실제로 채울 코드가 없는 상태로 방치된다. 다음에
+데이터 수집/모델 선택 실물(또는 스텁)을 다룰 때 스키마 통합도 같이
+하는 쪽을 택했다 — DESIGN.md "아직 결정 안 된 것"에 목록으로 남김.
+
+---
+
+## 2026-09-21 — state.py 스키마 정리(analysis+forecast 통합, 라운드 필드 삭제)
+
+바로 위 리팩터링에서 "손 안 대고 목록으로만 남긴다"고 했던 스키마 불일치를
+같은 날 두 번째 패스로 정리했다.
+
+**`data_source_basis`/`model_selection`을 선택 필드로 흡수**: 원래
+`AnalysisAgentRecord`에서는 이 두 필드가 필수였다(값을 안 채우면
+인스턴스를 만들 수 없음). `ForecastAgentRecord`로 옮기며 `| None = None`
+(선택 필드)으로 바꿨다 — 이 필드를 채우는 실제 데이터 소스 판단·모델
+선택 로직이 아직 없어서(M3 공백), 필수로 두면 그 로직이 생기기 전까지
+`ForecastAgentRecord`를 만들 때마다 의미 없는 placeholder 값을 넣어야
+하는 문제가 생긴다. `selected`/`selection_basis`도 이미 같은 이유로
+선택 필드였던 것과 일관된 선택.
+
+**`InteractionProtocol.max_rounds`/`repeat_escalation_threshold`는
+삭제가 아니라 선택 필드로 전환**: forecast<->supply_coordination에는
+더 이상 안 쓰이지만, supply_coordination↔procurement_plan 등(M5)에는
+여전히 라운드 상한·반복 임계치가 필요해 필드 자체를 없앨 수는 없었다
+— `int | None = None`으로 바꿔 엣지별로 선택적으로 채우게 했다.
+
+`interaction_protocol`을 소비하는 코드는 여전히 없다 — 이전 라운드
+로직이 이 필드를 읽던 유일한 코드였는데 그게 삭제됐고, 검증agent(M2)가
+아직 구현 안 돼 새 소비자도 없다. 의도된 공백이라 손대지 않음.
+
+기존 pytest 12건은 이 스키마 변경으로 깨진 게 하나도 없었다 — 라운드
+전제 필드(`round_history` 등)를 참조하던 테스트가 이미 지난 리팩터링
+패스에서 전부 교체됐기 때문.

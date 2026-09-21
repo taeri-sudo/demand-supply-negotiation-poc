@@ -8,35 +8,49 @@ demand-supply-negotiation-poc의 **현재 구현 상태**를 담는 문서. Stat
 ## 진행 상황
 
 - **M0 (State 스켈레톤 + 접근통제 wrapper)**: `src/sop/state.py`에 State
-  8개 최상위 필드를 pydantic `BaseModel`로 정의. `src/sop/access.py`에
+  최상위 필드 전체(필드 수는 STATE_SCHEMA.md 참고 — M1에서
+  analysis_agents가 forecast_agents로 통합되며 바뀜)를 pydantic
+  `BaseModel`로 정의. `src/sop/access.py`에
   `StateStore.get_field`/`set_field`(role_permissions 검사, set 시 큐 push
   동시 수행) 구현. `src/sop/capacity.py`에 `capacity_pools` 증감용
   `asyncio.Lock` 보호 헬퍼(`adjust_capacity_pool`) 구현. agent 로직은 아직
   없음(pytest 8건 — 권한 거부, set_field-큐 push 짝, 중첩 field_path
   읽기/쓰기, 와일드카드 권한, Lock 유무에 따른 동시성 경쟁 재현/해결).
-- **M1 (MILESTONES.md M1 — 2026-09-20 설계 재정의, 코드는 아직 구설계
-  그대로라 재작업 필요)**: 최초 구현은 forecast↔supply_coordination을
-  라운드 협상(격차 50% 좁히기, 변화율 수렴조건)으로 다뤘으나, 이후 설계
-  검토로 이 메커니즘 자체가 무효화됐다(JOURNAL.md 2026-09-16/2026-09-20
-  참고). `src/sop/forecast_supply_round.py` 등 M1 코드는 여전히 이 옛
-  설계를 그대로 구현하고 있어 재작업이 필요하다.
+- **M1 (MILESTONES.md M1 — 2026-09-21 코드를 2026-09-20 설계에 맞춰
+  리팩터링)**: 최초 구현은 forecast↔supply_coordination을 라운드 협상
+  (격차 50% 좁히기, 변화율 수렴조건)으로 다뤘으나, 설계 검토로 이
+  메커니즘 자체가 무효화됐다(JOURNAL.md 2026-09-16/2026-09-20 참고).
+  `src/sop/forecast_supply_round.py`(라운드 루프, `supply_coordination_respond`,
+  `forecast_next_proposal`, 관련 상수)를 삭제하고 `src/sop/forecast_supply_allocation.py`로
+  교체 — `allocate_forecast_candidate`(candidate 값을 그대로 담아
+  `allocation_candidate` 1개 생성, 우선순위 점수 산출은 회사 1개뿐이라
+  경쟁이 없어 이 값 그대로 근사 — 실제 경쟁 로직은 M4), `run_forecast_select_and_allocate`
+  (candidate 선택 → 위 생성까지 잇는 상위 진입점, 이전 `run_forecast_select_and_round`의
+  후신). capacity_pools/interaction_protocol을 더 이상 참조하지 않음
+  (테스트에서 해당 권한을 아예 안 줘서 직접 확인). pytest 3건(값이 그대로
+  전달되는지, `allocation_candidate` 1개 생성, negotiation_log 순서).
+  파일명은 `forecast_supply_round.py` → `forecast_supply_allocation.py`로
+  변경(CLAUDE.md 엣지 기반 파일명 규칙 — 더 이상 라운드가 없는데 "round"가
+  이름에 남으면 실제 동작과 안 맞음).
 
-  현재 설계(STATE_SCHEMA.md/AGENT_NODE_LIST.md/GRAPH_FLOW.md에 이미 반영):
-  - analysis agent와 forecast agent를 하나(`forecast_agents[]`, role_tag:
-    `forecast`)로 통합 — 데이터 수집(함수) → 데이터 소스 판단 → 모델
-    선택 → 시나리오 계산(함수) → 후보 선택, 전부 한 agent 내부 단계.
-  - 되돌림(핸드오프)은 `suspected_cause` 두 값만: "데이터 소스 문제"
-    (데이터 수집부터 재실행)/"모델 선택 문제"(모델 선택부터 재실행).
-  - `forecast → supply_coordination`(정방향, 평소): 단방향 전달(최적화)
-    — 후보 선택값을 supply_coordination이 우선순위 점수 산출 후
-    `allocation_candidate`로 생성, 라운드 없음.
-  - `supply_coordination → forecast`(역방향, 예외): 공급망계획agent의
-    infeasible 신호로만 열리는 핸드오프(재실행 지시) — 라운드 협상이
-    아니라, 위 되돌림 메커니즘을 그대로 재사용.
-  - 검증agent는 판정만 하고 라우팅은 안 함(관찰형) — `passed`의 push
-    여부는 받는 agent 성격에 따라 갈림(워커풀 성격 `procurement_plan`
-    등은 스스로 pull, 조율 성격 `supply_coordination`은 push), `flagged`는
-    항상 작성agent에게 push.
+  역방향(`supply_coordination → forecast`, plan agent의 infeasible이
+  트리거하는 핸드오프)은 plan agent 자체가 아직 없어(M5) 이번
+  리팩터링에서 구현하지 않음 — 트리거가 없다는 것만 확인.
+
+  **후속 정리(같은 날 2026-09-21, 두 번째 패스)**: 위 리팩터링 중 발견한
+  스키마 불일치를 마저 정리했다 — `AnalysisAgentRecord`/`analysis_agents`
+  삭제, 그 필드(`data_source_basis`/`model_selection`/`candidates`)를
+  `ForecastAgentRecord`로 흡수(전부 선택 필드 — 실제 데이터 소스 판단·
+  모델 선택 로직은 아직 없음, M3 공백은 그대로 남음). `ForecastAgentRecord`의
+  `current_round`/`round_history`, `ForecastRound` 클래스 삭제(라운드
+  협상 전제, 어느 방향도 더 이상 라운드가 없음). `InteractionProtocol`의
+  `max_rounds`/`repeat_escalation_threshold`는 삭제 대신 선택 필드로
+  전환(`int | None = None`) — forecast<->supply_coordination에는 안
+  쓰이지만 supply_coordination↔procurement_plan 등(M5)에는 여전히
+  필요하기 때문. interaction_protocol을 소비하는 코드는 여전히 없음 —
+  검증agent(M2)가 아직 구현 안 됐을 뿐이라 의도된 상태, M2 착수 시 처리.
+  기존 pytest 12건 그대로 통과(이 스키마 변경을 직접 건드리는 테스트가
+  없었음).
 
 ## 검토 후 현재 구조 유지로 확정
 
@@ -68,6 +82,14 @@ demand-supply-negotiation-poc의 **현재 구현 상태**를 담는 문서. Stat
   확정되면 MILESTONES.md의 인스턴스 단위를 전제한 서술을 전부 재검토해야
   함(재검토 트리거로 남겨둠). 별도 세션에서 STATE_SCHEMA.md부터 재설계
   예정. 상세 논거는 JOURNAL.md 2026-09-19 참고.
+- **forecast_agents의 data_source_basis/model_selection 실물 로직이
+  아직 없음(M3 공백)**: 2026-09-21 리팩터링으로 `state.py`의 스키마
+  자체는 STATE_SCHEMA.md 통합 스키마와 맞췄지만(`ForecastAgentRecord`가
+  `data_source_basis`/`model_selection`/`candidates`를 흡수, 라운드 전제
+  필드 삭제), 이 필드를 실제로 채우는 데이터 소스 판단·모델 선택 판단
+  로직 자체는 여전히 없다 — analysis agent 실물 구현을 맡았던 M3가
+  성립하지 않게 되며 생긴 공백(MILESTONES.md M3 참고)으로, 어느
+  마일스톤이 이 실물 구현을 맡을지 아직 안 정했다.
 - **procurement_plan이 여러 forecast 요청을 묶어 처리하는 게 나은지**: 여러
   forecast agent의 요청을 procurement_plan이 묶어서 처리(대량구매 단가 등)
   하는 게 나은지는 지금 넣지 않는다 — AGENT_NODE_LIST.md 설계(안건별 개별

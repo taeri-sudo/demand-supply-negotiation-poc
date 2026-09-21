@@ -1,4 +1,4 @@
-"""State의 8개 최상위 필드 정의. 구조는 STATE_SCHEMA.md를 따른다.
+"""State의 7개 최상위 필드 정의. 구조는 STATE_SCHEMA.md를 따른다.
 
 State 스키마 자체가 바뀌면(필드 추가/제거/형태 변경) 이 파일과
 STATE_SCHEMA.md를 함께 고친다 — 바뀐 이유는 JOURNAL.md에 남긴다.
@@ -18,7 +18,7 @@ AccessMode = Literal["r", "w"]
 
 
 class ValidationResult(BaseModel):
-    """analysis_agents/forecast_agents/exchanges 등에 내장되는 현재값 전용 검증 상태.
+    """forecast_agents/exchanges 등에 내장되는 현재값 전용 검증 상태.
 
     이력은 여기가 아니라 negotiation_log에 쌓인다(판단용 현재값과 기록용
     스냅샷 분리 — STATE_SCHEMA.md).
@@ -31,7 +31,13 @@ class ValidationResult(BaseModel):
     validator_role_tag: str | None = None
 
 
-# --- 1. analysis_agents -----------------------------------------------------
+# --- 1. forecast_agents ------------------------------------------------------
+# 원래 analysis_agents/forecast_agents 두 필드였으나 analysis agent와
+# forecast agent를 하나로 통합하며 합쳤다(되돌림 지점이 "데이터 소스
+# 문제"/"모델 선택 문제" 두 값으로 충분해져 agent 분리 이유가 사라짐 —
+# JOURNAL.md 2026-09-20 참고). data_source_basis/model_selection/candidates는
+# 실제 데이터 소스 판단·모델 선택 로직이 아직 없어(M3 공백) 값이 채워지지
+# 않을 수 있어 선택 필드로 둔다.
 
 
 class ForecastCandidate(BaseModel):
@@ -41,35 +47,18 @@ class ForecastCandidate(BaseModel):
     cost_estimate: float
 
 
-class AnalysisAgentRecord(BaseModel):
-    agent_id: str
-    role_tag: Literal["analysis"] = "analysis"
-    data_source_basis: DataSourceBasis
-    model_selection: str
-    candidates: list[ForecastCandidate] = Field(default_factory=list)
-    validation: ValidationResult | None = None
-
-
-# --- 2. forecast_agents ------------------------------------------------------
-
-
-class ForecastRound(BaseModel):
-    round: int
-    proposed: dict
-    response: dict | None = None
-
-
 class ForecastAgentRecord(BaseModel):
     agent_id: str
     role_tag: Literal["forecast"] = "forecast"
+    data_source_basis: DataSourceBasis | None = None
+    model_selection: str | None = None
+    candidates: list[ForecastCandidate] = Field(default_factory=list)
     selected: str | None = None
     selection_basis: SelectionBasis | None = None
-    current_round: int = 0
-    round_history: list[ForecastRound] = Field(default_factory=list)
     validation: ValidationResult | None = None
 
 
-# --- 3. capacity_pools --------------------------------------------------------
+# --- 2. capacity_pools --------------------------------------------------------
 
 
 class CapacityAdjustment(BaseModel):
@@ -86,7 +75,7 @@ class CapacityPool(BaseModel):
     linked_role_tags: list[str] = Field(default_factory=list)
 
 
-# --- 4. allocation_candidates -------------------------------------------------
+# --- 3. allocation_candidates -------------------------------------------------
 
 
 class Exchange(BaseModel):
@@ -112,7 +101,7 @@ class AllocationCandidate(BaseModel):
     exchanges: list[Exchange] = Field(default_factory=list)
 
 
-# --- 5. negotiation_log --------------------------------------------------------
+# --- 4. negotiation_log --------------------------------------------------------
 
 
 class NegotiationLogEntry(BaseModel):
@@ -122,13 +111,13 @@ class NegotiationLogEntry(BaseModel):
     ts: str
 
 
-# --- 6. interaction_protocol ---------------------------------------------------
+# --- 5. interaction_protocol ---------------------------------------------------
 
 
 class InteractionProtocol(BaseModel):
     edge: str
-    max_rounds: int
-    repeat_escalation_threshold: int
+    max_rounds: int | None = None
+    repeat_escalation_threshold: int | None = None
     scope: list[str]
     escalation_trigger: str | None = None
     escalation_target: str | None = None
@@ -137,7 +126,7 @@ class InteractionProtocol(BaseModel):
     last_updated: str | None = None
 
 
-# --- 7. role_permissions ---------------------------------------------------------
+# --- 6. role_permissions ---------------------------------------------------------
 
 
 class RolePermission(BaseModel):
@@ -146,7 +135,7 @@ class RolePermission(BaseModel):
     access: AccessMode
 
 
-# --- 8. escalation_records -----------------------------------------------------
+# --- 7. escalation_records -----------------------------------------------------
 
 
 class EscalationRecord(BaseModel):
@@ -158,7 +147,6 @@ class EscalationRecord(BaseModel):
 
 
 class State(BaseModel):
-    analysis_agents: list[AnalysisAgentRecord] = Field(default_factory=list)
     forecast_agents: list[ForecastAgentRecord] = Field(default_factory=list)
     capacity_pools: list[CapacityPool] = Field(default_factory=list)
     allocation_candidates: list[AllocationCandidate] = Field(default_factory=list)

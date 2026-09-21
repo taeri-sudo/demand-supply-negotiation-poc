@@ -66,7 +66,7 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
 ## 마일스톤
 
 ### M0 — State 스켈레톤 + 접근통제 wrapper (인프라, agent 없음)
-- STATE_SCHEMA.md의 8개 최상위 필드를 pydantic `BaseModel`로 전부 정의(구조는 문서
+- STATE_SCHEMA.md의 최상위 필드 전체를 pydantic `BaseModel`로 전부 정의(구조는 문서
   그대로, 값은 비어 있어도 됨).
 - `get_field`/`set_field` wrapper: `role_permissions[]` 화이트리스트 검사, `set_field`는
   값 기록과 동시에 해당 `asyncio.Queue`에 push.
