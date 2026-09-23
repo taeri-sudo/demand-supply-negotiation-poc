@@ -49,6 +49,9 @@ class ForecastCandidate(BaseModel):
 
 class ForecastAgentRecord(BaseModel):
     agent_id: str
+    company_id: str | None = None
+    item_id: str
+    pool_key: str | None = None
     role_tag: Literal["forecast"] = "forecast"
     data_source_basis: DataSourceBasis | None = None
     model_selection: str | None = None
@@ -72,7 +75,7 @@ class CapacityPool(BaseModel):
     total_capacity: float
     remaining_capacity: float
     adjustment_history: list[CapacityAdjustment] = Field(default_factory=list)
-    linked_role_tags: list[str] = Field(default_factory=list)
+    linked_pool_key: str | None = None
 
 
 # --- 3. allocation_candidates -------------------------------------------------

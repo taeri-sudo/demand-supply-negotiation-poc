@@ -246,3 +246,77 @@ fixture의 `role_permissions`에서 이 두 필드에 대한 권한 자체를 �
 기존 pytest 12건은 이 스키마 변경으로 깨진 게 하나도 없었다 — 라운드
 전제 필드(`round_history` 등)를 참조하던 테스트가 이미 지난 리팩터링
 패스에서 전부 교체됐기 때문.
+
+---
+
+## 2026-09-23 — forecast_agents 인스턴스 단위를 회사에서 (company_id, item_id)로 재설계
+
+기존 `ForecastAgentRecord`는 `agent_id`만 갖고 있었고, 이 값이 곧 "회사
+1개"를 가리킨다는 전제가 `forecast_supply_allocation.py`의 `agent_index`
+(forecast_agents 리스트 내 단일 정수 인덱스)와 테스트 하드코딩
+(`agent_id="FCT-1"` 1건)에 배어 있었다. 이 전제로는 한 회사가 여러
+item(예: 라면과 과자)을 동시에 주문해 item별로 다른 상태(하나는 정상,
+하나는 데이터 소스 문제)를 가지는 경우를 표현할 수 없었다 — Step1의
+Order-Item 중첩 실패와 같은 구조적 한계. STATE_SCHEMA.md/AGENT_NODE_LIST.md/
+MILESTONES.md는 이미 (회사,item) 인스턴스 단위로 갱신돼 있었고(이번
+세션 이전에 별도로 갱신됨), 이번 세션에서 그 스키마를 실제 코드에
+반영했다.
+
+**리스트 인덱스 대신 (company_id, item_id) 조회로 전환(채택)**: `agent_id`
+자체는 파싱 대상이 아니라 표시용 합성키(STATE_SCHEMA.md)이므로, 조회
+키를 `agent_id` 문자열 매칭이 아니라 `company_id`/`item_id` 필드 매칭으로
+결정했다. `forecast_supply_allocation.py`에 `_find_forecast_agent_index`
+헬퍼를 추가해 `run_forecast_select_and_allocate`가 `agent_index: int`
+대신 `company_id`/`item_id`를 받게 바꿨다 — 이 방향을 택한 이유는
+호출자가 "리스트에서 몇 번째"라는 구현 세부사항을 알아야 할 이유가
+없고, 인스턴스가 여러 개로 늘어나면(M4) 순서가 호출마다 달라질 수
+있어 인덱스 고정 가정 자체가 깨지기 때문이다. 이 헬퍼는 2026-09-15
+엔트리에서 "호출부마다 반복될 수 있다"고 남겨둔 "인덱스 탐색을
+caller-side 헬퍼로 뽑아내는" 패턴의 첫 실제 사례다.
+
+**대안(기각) — agent_id 문자열을 "{company_id}:{item_id}"로 파싱해서
+조회**: `agent_id`를 합성키로 정한 이상 파싱해서 company_id/item_id를
+복원하는 안도 가능했지만, STATE_SCHEMA.md가 이미 "agent_id는 파싱
+대상이 아니라 표시용 키로만 쓰고, 실제 필터링/조회는 company_id/item_id
+필드로 한다"고 명시했다 — 파싱을 넣으면 표시 형식(구분자 등)이 곧
+조회 로직의 일부가 되어 표시용 키라는 문서 전제가 깨진다.
+
+`analysis_stub.py`의 `get_stub_candidates()`도 인자 없이 고정된
+candidate 3개만 반환하던 것을, `item_id`별로 다른 candidate 세트를
+반환하도록 바꿨다(`company_id`도 시그니처에는 받지만 아직 결과에
+반영하지 않음 — data_source_basis 실물 판단이 없는 M3 공백이 그대로
+남아있기 때문. 나중에 회사별 분기가 필요해져도 호출부 시그니처가
+이미 (company_id, item_id)를 받고 있어 안 바뀜, MILESTONES.md 공통
+규칙 2와 같은 논리).
+
+**재현 절차**: `tests/test_forecast_supply_allocation.py`의
+`make_store()`에 같은 회사(`COMPANY-A`)의 두 item 인스턴스
+(`RAMEN`/`SNACK`)를 두고, `SNACK` 인스턴스만 골라
+`run_forecast_select_and_allocate`를 호출하는 테스트
+(`test_run_forecast_select_and_allocate_targets_only_matching_instance`)를
+추가했다. 리스트 인덱스 방식이었다면 인자를 잘못 넘겨도(예: 인덱스
+0과 1을 혼동) 타입 오류 없이 조용히 엉뚱한 인스턴스가 갱신됐을
+텐데, (company_id, item_id) 조회 방식에서는 이 테스트로 RAMEN
+인스턴스(`forecast_agents[0]`)가 전혀 갱신되지 않았음을 직접
+확인했다 — SNACK 인스턴스의 candidate가 RAMEN과 다른 값(confidence
+최고가 'b', value=80)이 나오도록 스텁을 설계해, 값이 우연히 같아서
+구분이 안 되는 상황을 피했다.
+
+`CapacityPool.linked_role_tags`(list[str], 기존에도 미사용)는
+`linked_pool_key`(단일 str)로 교체했다 — STATE_SCHEMA.md는 pool과
+forecast 인스턴스를 "인스턴스 나열이 아니라 자원 공유 단위(태그)로
+연결"한다고 명시했는데, 리스트로 인스턴스 자체를 나열하는 기존 필드
+설계는 이 방향과 맞지 않았다. `Optional[str] = None`으로 둔 이유는
+STATE_SCHEMA.md 예시 자체는 필수처럼 보이지만, `pool_key`가
+production_plan의 실제 배정 응답으로만 채워지는 값이라(forecast
+생성 시점엔 미정) capacity_pools 쪽도 아직 채울 근거가 없는 M1
+시점에는 필수로 두면 기존 `test_access.py`/`test_capacity_lock.py`의
+capacity_pools fixture(이 연결 로직과 무관하게 Lock/권한만 검증하는
+테스트)가 의미 없는 placeholder 값을 넣어야 하는 문제가 생기기
+때문 — `data_source_basis`/`model_selection`을 선택 필드로 둔 것과
+같은 논리(위 2026-09-21 엔트리 참고).
+
+기존 pytest 12건은 `agent_id="FCT-1"` 하드코딩과 `agent_index=0` 위치
+인자에 의존하고 있어 그대로 두면 깨지는 게 맞는 변경이었다 —
+`make_store`/세 테스트를 (company_id, item_id) 인자로 갱신했고, 새
+테스트 1건을 더해 13건 모두 통과 확인.

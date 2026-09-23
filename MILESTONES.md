@@ -96,7 +96,8 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
   덮어쓰기임을 유지(`candidates`/`selected`/`validation`은 매번 갱신, 이력은
   `negotiation_log`).
 - supply_coordination은 forecast가 선택한 candidate 값을 받아 우선순위 점수 산출
-  (회사가 1개뿐이라 tier 1~4 경쟁 자체가 없음 — 실제 다회사 경쟁 로직은 M4) 후
+  ((회사,item) 인스턴스가 1개뿐이라 tier 1~4 경쟁 자체가 없음 — 실제 다인스턴스
+  경쟁 로직은 M4) 후
   `allocation_candidate`를 1개 생성하는 **단방향 최적화**만 구현한다. 라운드/
   협상/escalation은 이 마일스톤 범위 밖이다 — GRAPH_FLOW.md "상호작용 세 가지
   유형"의 라운드 누적형(협상)은 공급망계획agent가 infeasible을 보냈을 때만
@@ -177,16 +178,17 @@ forecast agent 내부의 재실행 로직이다.
 맡을지(M1 확장 vs 새 마일스톤 vs M4 이후로 미룸)는 아직 정하지 않았다 —
 번호 재정렬과 함께 별도로 정리 필요.
 
-### M4 — N개 회사로 확장 + 진짜 병행성 증명
-- `forecast`(analysis 통합) agent를 회사별 N개(`asyncio.create_task()`)로 생성 — LangGraph
+### M4 — N개 (회사,item) 인스턴스로 확장 + 진짜 병행성 증명
+- `forecast`(analysis 통합) agent를 (회사,item) 인스턴스별 N개(`asyncio.create_task()`)로 생성 — LangGraph
   Send API 대신 asyncio를 택한 핵심 근거(스텝 동기화 없는 진짜 병행)를 여기서 증명.
 - 우선순위 tier 1(revenue_impact)·tier 3(aging 하한선)·tier 4(배분량 산출)만 구현,
   tier 2(forecast_reliability)는 SQLite가 필요하므로 M6까지 스텁(**공통 규칙 2** 적용).
 - 여러 회사가 공유 `capacity_pools`를 실제로 경합하는 상황 구성.
 
 **검증**
-- 3개 이상 회사 동시 실행 시 한 회사가 응답을 기다리는 동안 다른 회사가 실제로 진행되는지
-  (로그 순서가 인터리빙되는지) — 안 되면 asyncio 채택 근거 자체가 무너지므로 핵심 검증.
+- 3개 이상 인스턴스 동시 실행 시 한 인스턴스가 응답을 기다리는 동안 다른 인스턴스가 실제로
+  진행되는지(같은 회사의 서로 다른 item 인스턴스 포함, 로그 순서가 인터리빙되는지)
+  — 안 되면 asyncio 채택 근거 자체가 무너지므로 핵심 검증.
 - capacity 부족 상황에서 revenue_impact 순으로 배분되는지.
 - M0의 Lock이 다중 agent 부하에서도 `remaining_capacity`와 배분 합이 일치하는지.
 - DESIGN.md 갱신: "진행 상황"에 M4 요약, "검토 후 유지 확정"에 "N개 회사 동시 실행 시
@@ -281,3 +283,7 @@ forecast agent 내부의 재실행 로직이다.
 - supply_coordination 우선순위 점수 산출의 순수함수/판단 여부 → M7에서 해소.
 - STATE_SCHEMA.md의 `execution_records[]` 분리 설계 → 이번 마일스톤 범위 밖(그래프 노드가
   아닌 외부 경계이므로 실행 layer를 agent화하기 전까지는 다루지 않음).
+- 집계(company_id=null) 인스턴스 → 회사별 인스턴스 전환 로직 → 배정 마일스톤 미정.
+- 새 고객사 human_input의 allocation_candidates 반영 구조(demand_id/source) → 배정 마일스톤 미정.
+- 계약 물량 미충족 시 escalation ↔ sales_channel 통지 순서 → M5에서 확정.
+- capacity_pools 집계 수준의 적절성 → M5에서 negotiation_log로 실증 확인.

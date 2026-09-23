@@ -11,7 +11,7 @@ asyncio 태스크로 서로 안 막히고 진행, "이벤트 워커풀"은 트�
 ## 전체 구조 요약
 
 ```
-forecast agent(회사별 1개, 총 N개, role_tag: forecast) — 지속 태스크
+forecast agent((회사,item) 인스턴스별 1개, 총 N개, role_tag: forecast) — 지속 태스크
    (데이터 수집→데이터 소스 판단→모델 선택→시나리오 계산→후보 선택을
     한 agent 내부 단계로 수행 — 원래 analysis/forecast 두 agent였으나
     되돌림 지점이 "데이터 소스 문제"/"모델 선택 문제" 둘로 충분해 통합)
@@ -45,7 +45,7 @@ GRAPH_FLOW.md·AGENT_NODE_LIST.md 참고.
 물리적 실행이 아니라 **계획(약속·커밋) 판단**만 하므로 여기 속한다(아래
 "외부 경계"와 구분).
 
-### forecast agent (Agent, 회사별 1개, 총 N개, role_tag: `forecast`)
+### forecast agent (Agent, (회사,item) 인스턴스별 1개, 총 N개, role_tag: `forecast`)
 데이터 수집부터 후보 선택까지 한 agent가 담당한다 — 원래 analysis agent와
 forecast agent로 나뉘어 있었으나, 분리 이유였던 "되돌림 지점이 다르면
 agent도 분리"가 되돌림 지점을 재검토한 결과 두 값으로 충분해져(아래
@@ -104,11 +104,14 @@ supply_coordination이 역방향 되돌림을 시작했을 때만 조건부로 �
 선행됨 — forecast agent의 데이터 수집·추정 단계와 같은 성격이지만, 공급처 선택과 발주 절차가
 명확히 다른 카테고리의 판단이 아니라서 별도 agent로는 안 쪼갬. 실제
 자재가 도착하는 물리적 과정은 외부 경계. 공급업체 선정·계약관리는 이미
-전제로 주어진 것으로 스코프 밖(발주/주문 처리만 담당). **여러 회사
-(forecast agent)의 요청을 공유 자원(공급처 capacity) 문제라 1개 agent
-내부에서 안건별로 처리** — forecast agent(회사별 독립 태스크)와 다른
-이유: capacity_pools처럼 공유자원을 다루는 agent는 나눌 수 없음
-(supply_coordination을 1개로 둔 것과 같은 논리). **데이터 소스**: 실거래
+전제로 주어진 것으로 스코프 밖(발주/주문 처리만 담당). **여러
+(회사,item) 인스턴스(forecast agent)의 요청을 공유 자원(공급처
+capacity) 문제라 1개 agent 내부에서 안건별로 처리** — forecast
+agent(인스턴스별 독립 태스크)와 다른 이유: 공급처 capacity처럼
+공유자원을 다루는 agent는 나눌 수 없음(supply_coordination을 1개로
+둔 것과 같은 논리). **capacity_pools는 직접 접근하지 않음**
+(STATE_SCHEMA.md 참고 — 이 agent의 제약은 계좌형 공유 자원이 아니라
+확률분포 응답 구조). **데이터 소스**: 실거래
 데이터 없음 → 업계 KPI(평균)+표준편차 기반 확률분포 샘플링(추정 입력 +
 사후 결과 확인, 양쪽에 재사용, 고정값 아님).
 
@@ -117,15 +120,19 @@ supply_coordination이 역방향 되돌림을 시작했을 때만 조건부로 �
 패턴 추정 단계 선행(위와 동일한 이유로 별도 agent 분리 안 함). 실제 라인이
 도는 것(원자재 투입, 라인 실행)은 외부 경계 — 스케줄링(언제 무엇을
 얼마나 생산할지)만 담당하고, 실제 생산/조립 실행·품질테스트·인바운드/
-창고운영은 **제외 확정**(물리적 실행 영역). 여러 회사 요청을 1개 agent
-내부에서 처리(생산라인이라는 공유자원). **데이터 소스**: 업계 KPI(평균)+
+창고운영은 **제외 확정**(물리적 실행 영역). 여러 (회사,item) 인스턴스
+요청을 1개 agent 내부에서 처리(생산라인이라는 공유자원). **capacity_pools를
+직접 접근하는 유일한 plan agent**(자기 라인 자원이므로 — STATE_SCHEMA.md
+참고). **데이터 소스**: 업계 KPI(평균)+
 표준편차 기반 확률분포 샘플링(추정+결과 확인 겸용, 고정값 아님).
 
 ### logistics_plan agent (Agent, 1개, role_tag: `logistics_plan`)
 배송 자원·일정 **배정 결정**까지가 판단, 과거 배송 지연 패턴 추정 단계
 선행. 실제 트럭이 움직이는 것은 외부 경계 — 배송 자원·일정 배정만 담당,
-실제 운송/배송 실행은 스코프 밖(외부 경계). 여러 회사 요청을 1개 agent
-내부에서 처리(배송capacity라는 공유자원). **데이터 소스: SynDelay**(실
+실제 운송/배송 실행은 스코프 밖(외부 경계). 여러 (회사,item) 인스턴스
+요청을 1개 agent 내부에서 처리(배송capacity라는 공유자원). **capacity_pools는
+직접 접근하지 않음**(STATE_SCHEMA.md 참고 — procurement_plan과 같은 이유).
+**데이터 소스: SynDelay**(실
 데이터로 학습된 생성모델의 합성 데이터, 추정 입력 + 사후 결과 확인 겸용).
 
 ## 검증agent (워커풀 방식으로 일감을 받되, 판정만 하고 라우팅은 안 함)

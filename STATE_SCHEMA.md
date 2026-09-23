@@ -8,7 +8,7 @@ JOURNAL.md에 남긴다. 설명은 한글, 실제 필드명/태그값(스키마 
 ## 전체 구조 요약
 
 ```
-forecast agent(회사별 1개, 총 N개, role_tag: forecast) — 지속 태스크
+forecast agent((회사,item) 인스턴스별 1개, 총 N개, role_tag: forecast) — 지속 태스크
    (데이터 수집→데이터 소스 판단→모델 선택→시나리오 계산→후보 선택을
     한 agent 내부 단계로 수행 — 원래 analysis/forecast 두 agent였으나
     되돌림 지점이 "데이터 소스 문제"/"모델 선택 문제" 둘로 충분해 통합)
@@ -40,13 +40,13 @@ GRAPH_FLOW.md·AGENT_NODE_LIST.md 참고.
 ## 최상위 State 필드
 
 ### 1. `forecast_agents[]`
-개별 forecast agent 인스턴스(회사별 1개, 총 N개 — asyncio 지속 태스크로
-독립 실행). 원래 analysis agent와 forecast agent로 나뉘어 있었으나 하나로
+개별 forecast agent 인스턴스((회사, item) 조합별 1개, 총 N개 — asyncio
+지속 태스크로 독립 실행). 원래 analysis agent와 forecast agent로 나뉘어 있었으나 하나로
 통합했다 — 분리 이유였던 "되돌림 지점이 다르면 agent도 분리"가, 되돌림
 지점을 재검토한 결과 두 값("데이터 소스 문제"/"모델 선택 문제")으로
 충분해져 더 이상 성립하지 않는다(아래 "되돌림" 참고).
 ```
-{ agent_id, role_tag: "forecast",
+{ agent_id, company_id, item_id, pool_key, role_tag: "forecast",
   data_source_basis: "own_company" | "similar_companies",
   model_selection,
   candidates: [{scenario, value, confidence, cost_estimate}],
@@ -55,6 +55,27 @@ GRAPH_FLOW.md·AGENT_NODE_LIST.md 참고.
   validation: { status: "passed" | "flagged" | "check_failed", suspected_cause, rationale, ts, validator_role_tag }
 }
 ```
+
+인스턴스 단위는 (회사, item) 조합이다 — 한 회사가 여러 item(예: 라면과
+과자)을 동시에 주문할 수 있어, 회사 단위로만 나누면 item별로 다른 상태
+(하나는 정상, 하나는 데이터 소스 문제)를 표현할 수 없다(Step1 Order-Item
+중첩 실패와 같은 구조). `agent_id`는 `"{company_id}:{item_id}"` 같은
+합성키로 두되, 파싱 대상이 아니라 표시용 키로만 쓰고, 실제 필터링/조회는
+`company_id`/`item_id` 필드로 한다.
+
+`company_id`는 **Optional**이다. null은 "아직 특정 고객사에 귀속되지
+않은 집계 수요"를 뜻한다(신제품 출시 초기, 회사 단위 신규 프로모션 등 —
+그림의 "(우리회사) 신제품 판매량 예측"이 이 경우). 가짜 회사 값("우리회사"
+등)을 채우지 않는다 — `company_id`는 고객사 식별자 전용 필드이고, 그
+값이 아직 없다는 사실 자체를 null로 표현한다. 이 null 인스턴스가 이후
+실제 주문 발생 시 회사별 인스턴스로 쪼개지는 전환 로직은 **아직
+미구현**(아래 "아직 정하지 않은 것" 참고).
+
+`pool_key`는 forecast 단계에서 agent가 직접 정하는 값이 아니다 — 어느
+생산라인에 배정될지는 production_plan의 판단이므로, `allocation_candidates
+[i].exchanges`의 production_plan 응답으로 정해진 뒤 참조용으로 기록만
+된다(아래 `capacity_pools` 절 참고).
+
 내부 단계(순서대로, AGENT_NODE_LIST.md 참고): 데이터 수집(함수) →
 **데이터 소스 판단**(자사 이력 부족/부적합 시 유사 업종·사례로 대체할지
 결정) → **모델 선택**(판단, 계절성/간헐수요 등에 따라 통계기법 결정) →
@@ -91,9 +112,25 @@ Step1 원칙3: 판단용 현재값과 기록용 스냅샷 분리).
 ```
 { pool_id, total_capacity, remaining_capacity,  # 증감 가능
   adjustment_history: [{ts, delta, reason}],
-  linked_role_tags: ["forecast"]  # 인스턴스 나열이 아니라 역할 태그로 연결
+  linked_pool_key: "면류_라인A"  # 인스턴스 나열이 아니라 자원 공유 단위(태그)로 연결
 }
 ```
+
+`linked_pool_key`는 forecast 인스턴스 쪽의 `pool_key` 필드(위
+`forecast_agents[]` 참고)와 같은 값을 가진 인스턴스를 연결한다 — 같은
+값을 가진 인스턴스가 여럿이면 그 풀은 공유풀, 하나뿐이면 전용풀이 된다
+(풀 종류를 별도 표시하지 않고 연결 개수의 결과로만 드러남). `pool_key`는
+도메인 카테고리(예: "면류")가 아니라 **실제로 같은 생산라인/설비를
+공유하는가** 기준으로 묶는다 — 같은 카테고리여도 라인이 다르면 다른
+`pool_key`.
+
+**capacity_pools의 실제 접근 주체는 supply_coordination과
+production_plan뿐이다.** procurement_plan·logistics_plan은 `capacity_pools`를
+쓰지 않는다 — 이 둘의 제약은 "여러 요청이 실시간으로 같은 잔여량을
+나눠 갖는" 계좌형 공유 자원이 아니라, 업계 KPI 확률분포 샘플링으로
+요청마다 독립적으로 feasible/infeasible을 응답하는 구조이기 때문(아래
+"데이터 소스" 절 참고). logistics_plan은 아직 agent 자체가 미구현이라
+(M5) 권한 설정도 그때 정해진다.
 
 ### 3. `allocation_candidates[]` (현재 라운드)
 supply_coordination agent가 만드는 후보 배분안. "M개 agent"가 아니라 "1개
@@ -285,8 +322,12 @@ State 필드 단위 접근권한(agent 간, Unity Catalog의 시스템 접근통
 ```
 { role_tag, field_path, access: "r" | "w" }
 ```
-예: procurement_plan agent는 `capacity_pools`를 직접 못 읽고,
-`allocation_candidates[selected].exchanges`에서 자기 `role_tag`에 해당하는 항목만 r/w.
+예: procurement_plan·logistics_plan agent는 `capacity_pools`를 직접 못
+읽고(이 두 agent의 제약은 계좌형 공유 자원이 아니라 확률분포 응답이라
+애초에 참조 대상이 아님), `allocation_candidates[selected].exchanges`
+에서 자기 `role_tag`에 해당하는 항목만 r/w. `capacity_pools`는
+`supply_coordination`(r, 배분 판단용)과 `production_plan`(r/w, 자기
+라인 자원이므로)만 접근한다.
 
 ### 7. `escalation_records[]`
 사람(human_manager) 개입 기록.
@@ -328,3 +369,26 @@ validation agent가 왜 틀렸는지 자체를 신뢰할 수 없는 상태이므
 - 그래프 흐름(엣지, self-loop, 종료조건, 인스턴스 패턴 기준)은
   GRAPH_FLOW.md 참고 — 실행층이 실제 agent가 되면 `execution_records[]`
   등 새 최상위 필드로 분리 예정(지금은 외부 경계라 해당 없음)
+- **집계(company_id=null) 인스턴스 → 회사별 인스턴스 전환 로직**:
+  신제품/신규 프로모션이 처음엔 company_id=null로 시작했다가, 실제 주문이
+  들어오면 (회사, item) 인스턴스로 쪼개져야 함. 쪼개는 시점(주문 1건? N건?)과
+  기존 null 인스턴스의 candidates/validation 이력을 새 인스턴스가 승계하는지는
+  미정.
+- **새 고객사 주문(human_input)의 State 반영 구조**: forecast_agents
+  인스턴스 자체가 아니라 `allocation_candidates.allocation`
+  (`{forecast_agent_id: quantity}`)이 forecast 인스턴스에 묶여 있어, forecast
+  없이 human_input으로 바로 들어오는 수요를 표현 못 함. `demand_id`/
+  `source: "forecast" | "human_input"` 등으로 확장 필요 — forecast_agents
+  스키마와는 별개 변경.
+- **프로모션 3가지 경로**: 기존 (회사,item)에 얹히는 프로모션은
+  이번 재설계로 이미 커버(데이터 수집 단계의 입력 신호 하나로 취급). 남은
+  두 경로(company_id=null 신규 고객사향 프로모션 예측, 우리회사 자체
+  프로모션 예측)는 위 "집계 인스턴스 전환 로직"과 같은 문제로 함께 미정.
+- **계약 물량 미충족 시 escalation과 sales_channel "조정 불가" 통지의
+  순서**: escalation이 먼저 사람에게 조치 기회를 준 뒤에만 sales_channel로
+  "조정 불가"가 나가야 함(순서가 반대면 사람이 풀 수 있었던 건이 이미
+  불가로 통지됨). M5(plan agent 도입) 시점에 확정 필요.
+- **(재확인 필요) capacity_pools 집계 수준의 적절성**: supply_coordination이
+  보는 총량/잔여 수준이 production_plan의 세부 스케줄(changeover 등)에 비해
+  너무 거칠어 infeasible이 반복될 위험 — M5에서 negotiation_log 반복
+  패턴으로 실증 확인.

@@ -37,6 +37,24 @@ demand-supply-negotiation-poc의 **현재 구현 상태**를 담는 문서. Stat
   트리거하는 핸드오프)은 plan agent 자체가 아직 없어(M5) 이번
   리팩터링에서 구현하지 않음 — 트리거가 없다는 것만 확인.
 
+  **후속 정리(2026-09-23, 인스턴스 단위 재설계)**: forecast_agents
+  인스턴스 단위를 "회사 1개당 1개"에서 "(company_id, item_id) 조합당
+  1개"로 바꿨다(STATE_SCHEMA.md/AGENT_NODE_LIST.md/MILESTONES.md는 이미
+  이 단위로 갱신돼 있었음 — 이번 패스에서 코드에 반영). `ForecastAgentRecord`에
+  `company_id`(Optional)/`item_id`/`pool_key`(Optional) 필드 추가.
+  `forecast_supply_allocation.py`는 forecast_agents 인스턴스를 리스트
+  인덱스가 아니라 `_find_forecast_agent_index` 헬퍼로 (company_id,
+  item_id) 조회해서 찾도록 바꿨고(`run_forecast_select_and_allocate`의
+  `agent_index: int` 파라미터를 `company_id`/`item_id`로 교체),
+  `analysis_stub.py`의 `get_stub_candidates`는 `item_id`별로 다른
+  candidate 3개를 반환하게 됐다. `CapacityPool.linked_role_tags`(미사용)를
+  `linked_pool_key`(단일 str, Optional)로 교체 — STATE_SCHEMA.md의
+  "인스턴스 나열이 아니라 자원 공유 단위(태그)로 연결" 방향에 맞춤.
+  `tests/test_forecast_supply_allocation.py`에 같은 회사의 서로 다른
+  item 인스턴스 2개(라면/과자)를 두고, 한 인스턴스만 갱신했을 때 다른
+  인스턴스가 영향받지 않는지 확인하는 테스트 추가. pytest 13건(기존
+  12건 갱신 + 신규 1건) 통과. 상세 논거는 JOURNAL.md 2026-09-23 참고.
+
   **후속 정리(같은 날 2026-09-21, 두 번째 패스)**: 위 리팩터링 중 발견한
   스키마 불일치를 마저 정리했다 — `AnalysisAgentRecord`/`analysis_agents`
   삭제, 그 필드(`data_source_basis`/`model_selection`/`candidates`)를
@@ -74,14 +92,6 @@ demand-supply-negotiation-poc의 **현재 구현 상태**를 담는 문서. Stat
 (TBD — 예: 재무(9.0) 포함 여부 등 STEP2_SUMMARY.md에 이미 미정으로
 남아있는 것들이 여기로 옮겨올 수 있음)
 
-- **forecast_agents의 인스턴스 단위 재설계 가능성 — 회사
-  단위에서 (회사, item) 단위로**: 지금은 "회사 1개 = 인스턴스 1개"
-  (MILESTONES.md M1의 "회사 1개"/M4의 "N개 회사 확장" 등이 전부 이 전제)
-  인데, 한 회사가 여러 item(예: 라면과 과자)을 동시에 주문하는 경우를
-  표현할 수 없다는 구조적 한계가 발견됨. 아직 구현/문서 반영 전 —
-  확정되면 MILESTONES.md의 인스턴스 단위를 전제한 서술을 전부 재검토해야
-  함(재검토 트리거로 남겨둠). 별도 세션에서 STATE_SCHEMA.md부터 재설계
-  예정. 상세 논거는 JOURNAL.md 2026-09-19 참고.
 - **forecast_agents의 data_source_basis/model_selection 실물 로직이
   아직 없음(M3 공백)**: 2026-09-21 리팩터링으로 `state.py`의 스키마
   자체는 STATE_SCHEMA.md 통합 스키마와 맞췄지만(`ForecastAgentRecord`가
