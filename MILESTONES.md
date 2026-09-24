@@ -33,7 +33,7 @@ M0에서 미리 실물로 넣고, LLM 호출·실데이터 연동·SQLite 영속
 나중에 재작업이 발생하지 않는 규칙이다.
 
 **1. 검증agent는 edge를 하드코딩하지 않고 `interaction_protocol`/`role_permissions`를
-읽어 동작한다(M2부터 적용).** 검증agent는 라우팅 권한이 없고 판정만 한다(GRAPH_FLOW.md
+읽어 동작한다(M3부터 적용).** 검증agent는 라우팅 권한이 없고 판정만 한다(GRAPH_FLOW.md
 "검증agent" 참고) — `flagged`는 레코드를 만든 작성agent의
 `validation_result.{role_tag}` 채널로 push(작성agent의 role_tag를 그대로 쓰므로
 edge별 분기가 필요 없음), `check_failed`는 재시도 후 사람에게 push, `passed`는
@@ -84,13 +84,12 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
 - `forecast`(analysis 통합, 데이터 수집→데이터 소스 판단→모델 선택→시나리오
   계산→후보 선택), `supply_coordination` 두 agent만 실물 구현. 데이터
   수집·시나리오 계산은 하드코딩된 candidate를 반환하는 스텁으로 대체(실물
-  데이터/모델 로직을 어느 마일스톤에서 다룰지는 M3이 성립하지 않게 되며
-  생긴 공백 — 아래 M3 참고, 재배치 필요).
+  데이터/모델 로직은 M2에서 다룬다).
 - forecast의 후보 선택 판단은 **공통 규칙 2**에 따라 `{판단값, 근거}` pydantic
   스키마로 반환하는 규칙 기반 스텁으로 구현.
 - 되돌림(핸드오프) 로직 — `suspected_cause`가 "데이터 소스 문제"/"모델 선택
-  문제" 둘 중 무엇이냐에 따라 재개 지점이 갈리는지 구현(원래 M3 범위였으나,
-  검증agent(M2)나 supply_coordination의 역방향 되돌림(M5) 같은 외부 트리거
+  문제" 둘 중 무엇이냐에 따라 재개 지점이 갈리는지 구현(원래 별도 마일스톤
+  범위였으나, 검증agent(M3)나 supply_coordination의 역방향 되돌림(M5) 같은 외부 트리거
   없이도 forecast agent 내부 로직만으로 독립 테스트 가능해 M1로 흡수 —
   candidate 선택의 판단3계층 분기와 같은 성격). 이력 누적이 아니라 현재값
   덮어쓰기임을 유지(`candidates`/`selected`/`validation`은 매번 갱신, 이력은
@@ -116,7 +115,26 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
   이벤트가 남는지 확인.
 - DESIGN.md 갱신: "진행 상황"에 M1 요약 추가.
 
-### M2 — 핵심 메커니즘 2: 검증agent (interaction_protocol 기반 일반화, 라우팅 권한 없음)
+### M2 — forecast agent 실물 판단 로직 구현 (스텁 제거)
+- M1에서 하드코딩된 candidate 3개(a/b/c)를 반환하던 스텁을 실물 판단 로직으로
+  교체한다 — **공통 규칙 2**에 따라 반환 스키마는 그대로 두고 내부 구현만 바꾼다.
+- **데이터 소스 판단**: (company_id, item_id) 인스턴스별로 자사 이력이
+  존재/충분한지 확인하는 규칙(예: 최소 관측치 수) → 부족하면 유사 사례로
+  대체하는 로직을 규칙 기반으로 구현.
+- **모델 선택**: 계절성/간헐수요 등 데이터 특성에 따라 통계기법을 고르는 규칙
+  기반 판단 구현(LLM 연동은 M7).
+- **데이터**: 로컬 고정 샘플 데이터 사용(Kaggle Store Item Demand·SynDelay·
+  업계 KPI 실연동은 M7 — 이 마일스톤은 판단 로직 자체 검증이 목적).
+
+**검증**
+- 자사 이력이 부족한 인스턴스는 `data_source_basis: "similar_companies"`로,
+  충분한 인스턴스는 `"own_company"`로 판정되는지.
+- 데이터 특성이 다른 두 인스턴스가 서로 다른 `model_selection` 값을 받는지
+  (하드코딩된 스텁과 달리 실제 입력에 반응하는지).
+- 반환 스키마가 스텁일 때와 동일한 pydantic 모델인지(공통 규칙 2, M7 교체 대비).
+- DESIGN.md 갱신: "진행 상황"에 M2 요약 추가.
+
+### M3 — 검증agent (interaction_protocol 기반 일반화, 라우팅 권한 없음)
 - 도메인 검증 agent 1개(예: `forecast_validation`)를 이벤트 트리거 워커풀로 구현.
 - M1에서 직접 최적화 결과를 쓰던 흐름을 "작성agent → 검증agent 큐 → 판정"으로
   바꾸되, **공통 규칙 1**에 따라 edge를 하드코딩하지 않고 `interaction_protocol[]`
@@ -153,30 +171,9 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
 - **일반화 검증**: `interaction_protocol[]`에 테스트용 더미 edge 항목 하나를 추가하는
   것만으로(검증agent 코드 수정 없이) 그 edge가 같은 흐름을 통과하는지 확인 — 코드
   변경 없이 설정 추가만으로 새 edge가 동작함을 증명.
-- DESIGN.md 갱신: "진행 상황"에 M2 요약, "검토 후 유지 확정"에 "검증agent는
+- DESIGN.md 갱신: "진행 상황"에 M3 요약, "검토 후 유지 확정"에 "검증agent는
   판정만 하고 라우팅은 각 agent 자신의 역할로 분리, edge 추가 시 코드 변경
   불필요" 기록.
-
-### M3 — 성립 안 함(analysis agent가 별도로 존재하지 않음)
-analysis agent와 forecast agent가 하나로 통합되면서(2026-09-20, JOURNAL.md
-참고) "analysis ↔ forecast 핸드오프형 상호작용"이라는 이 마일스톤 자체가
-성립하지 않는다 — 되돌림은 이제 별도 agent 간 엣지가 아니라 통합된
-forecast agent 내부의 재실행 로직이다.
-
-**검토 결과**: 이 마일스톤이 검증하려던 핵심 내용(되돌림 시 재개 지점이
-`suspected_cause`에 따라 정확히 갈리는지, 이력이 덮어써지는지)은 M1
-범위로 흡수했다 — 핸드오프 자체가 검증agent(M2)나 supply_coordination의
-역방향 되돌림(M5) 같은 외부 트리거 없이도, forecast agent 내부 로직만으로
-독립적으로 테스트 가능하기 때문(candidate 선택의 판단3계층 분기와 같은
-성격).
-
-**흡수 안 된 부분(공백, 재배치 필요)**: M3에는 되돌림 검증 외에
-`data_source_basis`/`model_selection` 판단의 **실물** 구현(M1 스텁 제거,
-로컬 고정 샘플 데이터 사용)이라는 별개 범위가 있었는데, 이건 M1의
-"내부 재실행 로직 검증"과 성격이 달라(스텁이 아니라 실물 판단 로직
-자체를 만드는 일) 그대로 흡수하지 않았다. 이 실물 구현을 어느 마일스톤이
-맡을지(M1 확장 vs 새 마일스톤 vs M4 이후로 미룸)는 아직 정하지 않았다 —
-번호 재정렬과 함께 별도로 정리 필요.
 
 ### M4 — N개 (회사,item) 인스턴스로 확장 + 진짜 병행성 증명
 - `forecast`(analysis 통합) agent를 (회사,item) 인스턴스별 N개(`asyncio.create_task()`)로 생성 — LangGraph
@@ -199,7 +196,7 @@ forecast agent 내부의 재실행 로직이다.
   규칙 기반부터 시작(**공통 규칙 2** 적용, 업계 KPI 분포 샘플링 정교화는 M7).
 - `required_stages`로 단계 스킵, `exchanges[]` 라운드 누적, `response_status` 종료조건.
 - **plan agent 간 직접 상호작용(미확정 사항)은 건드리지 않고, 반드시 supply_coordination
-  경유로만 구현.** M2에서 만든 일반화 게이트 덕분에, 향후 이 상호작용을 열기로 결정하면
+  경유로만 구현.** M3에서 만든 일반화 게이트 덕분에, 향후 이 상호작용을 열기로 결정하면
   `interaction_protocol`에 항목만 추가하면 됨(공통 규칙 1).
 - plan agent가 infeasible을 보내면 supply_coordination이 forecast로 역방향
   되돌림을 연다(GRAPH_FLOW.md "상호작용 세 가지 유형" 참고, 핸드오프형) —
@@ -218,7 +215,7 @@ forecast agent 내부의 재실행 로직이다.
   `repeat_escalation_threshold`가 트립돼 forecast로의 핸드오프(또는 사람
   escalation)까지 확장되는 경로 재현 — `repeat_escalation_threshold` 자체는
   이 라운드형 엣지에서만 계산되고, forecast로의 핸드오프는 트리거만 될 뿐
-  별도 카운트가 없는지 확인. M2의 헬퍼가 이 엣지에서도 재사용되는지(코드
+  별도 카운트가 없는지 확인. M3의 헬퍼가 이 엣지에서도 재사용되는지(코드
   수정 없이 동작하는지)도 함께 확인.
 - DESIGN.md 갱신: "진행 상황"에 M5 요약, "아직 결정 안 된 것"에 "plan agent 간 직접
   상호작용 여부 — M8에서 데이터 기반 판단 예정"이 유지되어 있는지 확인.
@@ -248,7 +245,7 @@ forecast agent 내부의 재실행 로직이다.
   **공통 규칙 2** 덕분에 M1~M6에서 만든 스텁들의 반환 스키마가 이미 동일하므로, 내부
   구현만 Gemini 호출로 교체하고 호출부는 변경하지 않는다.
 - Langfuse 트레이싱 연결, Kaggle Store Item Demand·SynDelay·업계 KPI 분포 샘플링을
-  실제로 연동(M3/M5의 로컬 고정 샘플 대체).
+  실제로 연동(M2/M5의 로컬 고정 샘플 대체).
 
 **검증**
 - 확실한 케이스는 LLM 호출 없이 규칙만으로 처리되고 애매한 케이스만 LLM이 호출되는지

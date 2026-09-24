@@ -1,9 +1,9 @@
 """analysis agent 스텁 (M1).
 
 실물 analysis agent(데이터 소스 판단·모델 선택·시나리오 계산)의 실제 구현은
-아직 배정된 마일스톤이 없다(DESIGN.md "아직 결정 안 된 것" 참고 — 원래
-M3가 맡았으나 analysis/forecast 통합으로 M3 자체가 성립하지 않게 되며
-생긴 공백). 그 전까지는 item_id별로 하드코딩된 a/b/c candidate를 반환해,
+M2가 맡는다(DESIGN.md "아직 결정 안 된 것" 참고 — 원래 옛 M3가 맡았으나
+analysis/forecast 통합으로 성립하지 않게 되며 생긴 공백을 새 M2가 메움).
+그 전까지는 item_id별로 하드코딩된 a/b/c candidate를 반환해,
 forecast agent의 후보 선택 판단(`forecast_candidate_selection.py`)과 그
 이후 배분(`forecast_supply_allocation.py`)을 인스턴스별로 독립적으로
 검증할 수 있게 한다.

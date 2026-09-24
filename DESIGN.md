@@ -59,14 +59,14 @@ demand-supply-negotiation-poc의 **현재 구현 상태**를 담는 문서. Stat
   스키마 불일치를 마저 정리했다 — `AnalysisAgentRecord`/`analysis_agents`
   삭제, 그 필드(`data_source_basis`/`model_selection`/`candidates`)를
   `ForecastAgentRecord`로 흡수(전부 선택 필드 — 실제 데이터 소스 판단·
-  모델 선택 로직은 아직 없음, M3 공백은 그대로 남음). `ForecastAgentRecord`의
+  모델 선택 로직은 아직 없음, M2 공백은 그대로 남음). `ForecastAgentRecord`의
   `current_round`/`round_history`, `ForecastRound` 클래스 삭제(라운드
   협상 전제, 어느 방향도 더 이상 라운드가 없음). `InteractionProtocol`의
   `max_rounds`/`repeat_escalation_threshold`는 삭제 대신 선택 필드로
   전환(`int | None = None`) — forecast<->supply_coordination에는 안
   쓰이지만 supply_coordination↔procurement_plan 등(M5)에는 여전히
   필요하기 때문. interaction_protocol을 소비하는 코드는 여전히 없음 —
-  검증agent(M2)가 아직 구현 안 됐을 뿐이라 의도된 상태, M2 착수 시 처리.
+  검증agent(M3)가 아직 구현 안 됐을 뿐이라 의도된 상태, M3 착수 시 처리.
   기존 pytest 12건 그대로 통과(이 스키마 변경을 직접 건드리는 테스트가
   없었음).
 
@@ -93,13 +93,14 @@ demand-supply-negotiation-poc의 **현재 구현 상태**를 담는 문서. Stat
 남아있는 것들이 여기로 옮겨올 수 있음)
 
 - **forecast_agents의 data_source_basis/model_selection 실물 로직이
-  아직 없음(M3 공백)**: 2026-09-21 리팩터링으로 `state.py`의 스키마
+  아직 없음(M2에서 구현 예정)**: 2026-09-21 리팩터링으로 `state.py`의 스키마
   자체는 STATE_SCHEMA.md 통합 스키마와 맞췄지만(`ForecastAgentRecord`가
   `data_source_basis`/`model_selection`/`candidates`를 흡수, 라운드 전제
   필드 삭제), 이 필드를 실제로 채우는 데이터 소스 판단·모델 선택 판단
-  로직 자체는 여전히 없다 — analysis agent 실물 구현을 맡았던 M3가
-  성립하지 않게 되며 생긴 공백(MILESTONES.md M3 참고)으로, 어느
-  마일스톤이 이 실물 구현을 맡을지 아직 안 정했다.
+  로직 자체는 여전히 없다 — analysis agent 실물 구현을 맡았던 옛 M3가
+  성립하지 않게 되며 생긴 공백이었으나, 이 실물 구현은 새로 신설된 M2
+  (MILESTONES.md M2 "forecast agent 실물 판단 로직 구현")가 맡기로
+  정해졌다. M2 완료 시 이 항목을 제거한다.
 - **procurement_plan이 여러 forecast 요청을 묶어 처리하는 게 나은지**: 여러
   forecast agent의 요청을 procurement_plan이 묶어서 처리(대량구매 단가 등)
   하는 게 나은지는 지금 넣지 않는다 — AGENT_NODE_LIST.md 설계(안건별 개별

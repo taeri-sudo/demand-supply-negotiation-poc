@@ -98,7 +98,7 @@ Claude Code가 `select_forecast_candidate`를 구현하며, STATE_SCHEMA.md가
 - **조건 분기까지 구현(기각)**: "신뢰구간이 좁다"를 무엇으로 판정할지
   (candidate 간 confidence 격차의 임계치, 표준편차 등)가 STATE_SCHEMA.md/
   MILESTONES.md 어디에도 구체적으로 정의돼 있지 않아, 이 임계치 자체를
-  Claude Code가 자체 판단으로 정해야 했다. 이후 analysis 실물(M3)이 실제
+  Claude Code가 자체 판단으로 정해야 했다. 이후 analysis 실물(M2)이 실제
   confidence 분포를 내기 전까지는 이 임계치가 실제 데이터로 검증될 수
   없어, 지금 정해봤자 근거 없는 값이 될 것으로 판단해 기각.
 - **조건 없이 규칙①만 적용(채택)**: M1의 candidate는 analysis_stub.py의
@@ -107,7 +107,7 @@ Claude Code가 `select_forecast_candidate`를 구현하며, STATE_SCHEMA.md가
   주지 조건 분기 유무는 영향을 주지 않는다 — 지금 결정해도 검증할 방법이
   없는 조건을 미리 하드코딩하는 대신, 뒤로 미루는 쪽을 택했다.
 
-재검토 트리거(analysis 실물 연동, M3)는 DESIGN.md 참고.
+재검토 트리거(analysis 실물 연동, M2)는 DESIGN.md 참고.
 
 이후 해당 로직(라운드 협상) 자체가 폐기되며 이 판단도 함께 무효화됨 —
 2026-09-19 이후 기록 참고.
@@ -212,7 +212,7 @@ fixture의 `role_permissions`에서 이 두 필드에 대한 권한 자체를 �
 갖고 있고 `ForecastAgentRecord`에 라운드 전제 필드(`round_history` 등)가
 남아있는 걸 발견했으나, 이 스키마 통합은 M1(candidate 선택→배분 생성)
 범위보다 크다 — 되돌림(핸드오프)의 실제 재실행 대상인 데이터 수집·모델
-선택 로직 자체가 아직 스텁도 없어서(MILESTONES.md M3 공백), 스키마만
+선택 로직 자체가 아직 스텁도 없어서(MILESTONES.md M2 공백), 스키마만
 먼저 바꾸면 그 필드를 실제로 채울 코드가 없는 상태로 방치된다. 다음에
 데이터 수집/모델 선택 실물(또는 스텁)을 다룰 때 스키마 통합도 같이
 하는 쪽을 택했다 — DESIGN.md "아직 결정 안 된 것"에 목록으로 남김.
@@ -228,7 +228,7 @@ fixture의 `role_permissions`에서 이 두 필드에 대한 권한 자체를 �
 `AnalysisAgentRecord`에서는 이 두 필드가 필수였다(값을 안 채우면
 인스턴스를 만들 수 없음). `ForecastAgentRecord`로 옮기며 `| None = None`
 (선택 필드)으로 바꿨다 — 이 필드를 채우는 실제 데이터 소스 판단·모델
-선택 로직이 아직 없어서(M3 공백), 필수로 두면 그 로직이 생기기 전까지
+선택 로직이 아직 없어서(M2 공백), 필수로 두면 그 로직이 생기기 전까지
 `ForecastAgentRecord`를 만들 때마다 의미 없는 placeholder 값을 넣어야
 하는 문제가 생긴다. `selected`/`selection_basis`도 이미 같은 이유로
 선택 필드였던 것과 일관된 선택.
@@ -240,7 +240,7 @@ fixture의 `role_permissions`에서 이 두 필드에 대한 권한 자체를 �
 — `int | None = None`으로 바꿔 엣지별로 선택적으로 채우게 했다.
 
 `interaction_protocol`을 소비하는 코드는 여전히 없다 — 이전 라운드
-로직이 이 필드를 읽던 유일한 코드였는데 그게 삭제됐고, 검증agent(M2)가
+로직이 이 필드를 읽던 유일한 코드였는데 그게 삭제됐고, 검증agent(M3)가
 아직 구현 안 돼 새 소비자도 없다. 의도된 공백이라 손대지 않음.
 
 기존 pytest 12건은 이 스키마 변경으로 깨진 게 하나도 없었다 — 라운드
@@ -284,7 +284,7 @@ caller-side 헬퍼로 뽑아내는" 패턴의 첫 실제 사례다.
 `analysis_stub.py`의 `get_stub_candidates()`도 인자 없이 고정된
 candidate 3개만 반환하던 것을, `item_id`별로 다른 candidate 세트를
 반환하도록 바꿨다(`company_id`도 시그니처에는 받지만 아직 결과에
-반영하지 않음 — data_source_basis 실물 판단이 없는 M3 공백이 그대로
+반영하지 않음 — data_source_basis 실물 판단이 없는 M2 공백이 그대로
 남아있기 때문. 나중에 회사별 분기가 필요해져도 호출부 시그니처가
 이미 (company_id, item_id)를 받고 있어 안 바뀜, MILESTONES.md 공통
 규칙 2와 같은 논리).

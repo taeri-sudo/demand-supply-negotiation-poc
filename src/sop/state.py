@@ -36,7 +36,7 @@ class ValidationResult(BaseModel):
 # forecast agent를 하나로 통합하며 합쳤다(되돌림 지점이 "데이터 소스
 # 문제"/"모델 선택 문제" 두 값으로 충분해져 agent 분리 이유가 사라짐 —
 # JOURNAL.md 2026-09-20 참고). data_source_basis/model_selection/candidates는
-# 실제 데이터 소스 판단·모델 선택 로직이 아직 없어(M3 공백) 값이 채워지지
+# 실제 데이터 소스 판단·모델 선택 로직이 아직 없어(M2 공백) 값이 채워지지
 # 않을 수 있어 선택 필드로 둔다.
 
 
