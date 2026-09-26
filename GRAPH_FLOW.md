@@ -1,8 +1,8 @@
 # Step 2 그래프 흐름 설계
 
 State/노드 목록이 "무엇이 있는지"였다면, 이 문서는 "그것들이 어떤 순서·
-조건으로 연결되는지"를 정리한다. 동시성 모델은 asyncio(단일 프로세스,
-STATE_SCHEMA.md "동시성 모델" 참고) — 아래 "엣지"는 그래프의 정적 연결이
+조건으로 연결되는지"를 정리한다(agent 간 연결·신호·종료조건·동시성).
+동시성 모델은 asyncio(단일 프로세스, 아래 "동시성 모델" 참고) — 아래 "엣지"는 그래프의 정적 연결이
 아니라 **태스크 간 신호(asyncio.Queue) 교환**으로 구현된다. 이 모델에서는
 "모든 회사의 응답이 도착해야 다음으로 넘어간다"는 제약이 없음 —
 supply_coordination 태스크는 그때그때 도착한 만큼만 보고 판단 가능.
@@ -10,10 +10,9 @@ supply_coordination 태스크는 그때그때 도착한 만큼만 보고 판단 
 ## 전체 구조 요약
 
 ```
-forecast agent(회사별 1개, 총 N개, role_tag: forecast) — 지속 태스크
-   (데이터 수집→데이터 소스 판단→모델 선택→시나리오 계산→후보 선택을
-    한 agent 내부 단계로 수행 — 원래 analysis/forecast 두 agent였으나
-    되돌림 지점이 "데이터 소스 문제"/"모델 선택 문제" 둘로 충분해 통합)
+forecast agent((회사,item) 인스턴스별 1개, 총 N개, role_tag: forecast) — 지속 태스크
+   (시나리오 정의→데이터 수집·소스 판단→예측기법 선택→시나리오별 예측 계산→
+    발생 가능성 평가→시나리오 선택을 한 agent 내부 단계로 수행)
         ↕  (신호 기반, 평소 정방향 최적화 / 예외 시에만 역방향 핸드오프)
 supply_coordination agent(1개, role_tag: supply_coordination) — 지속 태스크
    ↕procurement_plan   ↕production_plan   ↕logistics_plan  (각 1개, 지속 태스크)
@@ -25,19 +24,47 @@ supply_coordination agent(1개, role_tag: supply_coordination) — 지속 태스
 validation agent(들) — 일감은 이벤트 트리거·무기억 워커풀 방식으로 받고,
 판정(`passed`/`flagged`/`check_failed`)만 State에 쓴다 — 라우팅 권한은
 없고, push 여부는 받는 agent 성격(워커풀=pull, 조율=push)에 따른
-기계적 규칙일 뿐이다(상세는 GRAPH_FLOW.md "검증agent" 참고). human_manager(들) —
-escalation 발생 시에만 반응, 지속 태스크 아님.
+기계적 규칙일 뿐이다(아래 "검증agent" 참고). human_manager(들) —
+escalation 발생 시 반응(알림은 받기만 함), 지속 태스크 아님.
 
 문제 발생 시: 공급망계획agent → supply_coordination → (필요시) forecast/
 채널/사람 escalation — 어디까지 되돌릴지는 interaction_protocol이
 규정.
 ```
 
-**동시성 모델**: asyncio 단일 프로세스(Docker/Redis 없이 시작) — 각 지속
-태스크가 서로 안 막히고 독립적으로 진행, in-process 신호(asyncio.Queue)로
-소통. "라운드"는 그래프 스텝이 아니라 신호 교환으로 구현되며, 모든 분기가
-끝나야 다음으로 넘어가는 제약(Pregel 방식의 한계) 자체가 없음. 상세는
-GRAPH_FLOW.md·AGENT_NODE_LIST.md 참고.
+## 동시성 모델 (asyncio)
+
+- **구조**: forecast((회사,item) 인스턴스별, 총 N개)와 supply_coordination/
+  공급망계획agent(각 1개)를 각각 독립된 **asyncio 태스크**로 실행 — Docker/
+  Redis 같은 별도 프로세스·네트워크 없이, 파이썬 프로세스 하나 안에서
+  이벤트루프가 태스크들을 오가며 진행(cooperative multitasking)
+- **왜 LangGraph Send API가 아닌지**: Send API는 "한 스텝 안에서 N개로
+  갈라졌다가 그 스텝이 끝나야 합쳐지는" 모델이라, "A회사 처리 중 응답을
+  기다리는 동안 B회사 작업을 진행"하는 독립적 병행이 안 됨. asyncio
+  태스크는 `asyncio.create_task()`로 만들고, I/O 대기(LLM 응답 대기 등)
+  중엔 다른 태스크가 자동으로 진행됨. "라운드"는 그래프 스텝이 아니라
+  신호 교환으로 구현된다
+- **통신**: agent 간 직접 호출이 아니라 항상 State를 거침 — 한쪽이 State에
+  값을 쓰고 in-process 신호(`asyncio.Queue`)로 알리면, 상대가 그 신호를 받아
+  State를 읽고 반응. 큐는 "초인종" 역할만 하고 기록은 State/negotiation_log가
+  담당. State 접근 wrapper와 Lock은 STATE_SCHEMA.md "State 접근 규칙" 참고
+- **한계**: 진행 중인 LLM 호출 하나에 끼어들 수는 없음 — LLM 호출 자체가
+  원자적 단위
+- **확장 여지(지금 안 만듦)**: State를 거쳐서만 통신하는 원칙을 지키면,
+  나중에 in-process 큐를 Redis 등 외부 큐로 교체해 물리적으로 분리된 서버와
+  통신하게 확장 가능 — agent 로직은 안 건드리고 큐 구현체만 교체
+
+### 계획 주기와 스냅샷
+
+실행 리듬은 실시간 연속 스트림이 아니라 **계획 주기**(월간 등) 기반이다.
+- 주기가 시작될 때 그 시점까지의 데이터로 **스냅샷을 고정**하고, 주기
+  동안(되돌림 재실행 포함) 모든 agent는 이 스냅샷만 본다
+- 주기 중 발생한 실제 주문은 실행층(sales_channel)의 일이며 다음 주기
+  스냅샷에 반영된다
+- POS 공유 지연은 스냅샷 기준일보다 앞선 데이터까지만 포함하는 식으로
+  표현한다
+- 고정 파일에서 기준일까지를 잘라 읽으므로, 테스트에서는 기준일을 옮겨
+  여러 주기를 재현할 수 있다
 
 ## Push/Pull 용어 정리
 
@@ -58,9 +85,7 @@ GRAPH_FLOW.md·AGENT_NODE_LIST.md 참고.
 없는지"는 검증agent가 판단하지만, "문제가 생겼을 때 그걸 어디로 되돌릴지"는
 이미 각 agent 자신의 기존 역할에 있는 권한이다 — forecast의 핸드오프
 되돌림, supply_coordination의 "공급망계획agent 문제 신호 처리" 판단 등.
-검증agent가 라우팅까지 대신하면 이 권한이 중복된다(이전에 "critical path를
-막는 게이트, 검증agent가 직접 다음 큐에 push"로 정정한 적이 있으나 번복 —
-판정과 라우팅을 분리).
+검증agent가 라우팅까지 대신하면 이 권한이 중복된다.
 
 흐름:
 1. 값을 쓴 agent는 **원래 의도한 다음 agent 큐가 아니라, 검증agent 큐에만
@@ -97,7 +122,7 @@ GRAPH_FLOW.md·AGENT_NODE_LIST.md 참고.
        판단 업무에 부담이 됨 — 그래서 검증agent가 대신 알려준다. (`procurement_plan` 등
        워커풀 성격 agent에는 이 이유가 해당 안 됨 — 안건 단위 확인이
        애초에 이들의 본래 일이라 확인 자체가 부담이 아니다.) 예:
-       `forecast`가 선택한 candidate가 `passed`면 `supply_coordination`
+       `forecast`가 선택한 시나리오가 `passed`면 `supply_coordination`
        에게 push, `procurement_plan`의 응답이 `passed`면
        `supply_coordination`에게 push.
      - 각 agent가 어느 쪽인지는 AGENT_NODE_LIST.md의 agent별 설명(몇 개
@@ -135,10 +160,13 @@ GRAPH_FLOW.md·AGENT_NODE_LIST.md 참고.
 지켜보고 있던 채널)이라 별도 구독이 필요 없다.
 
 **여전히 남는 한계**: 검증agent 자신이 "이상 없음(passed)"을 잘못 낸
-경우는 실시간으로 못 잡음 — 이건 STATE_SCHEMA.md "구조적 한계"에 남긴
-대로, 다운스트림 불일치로 사후 발견되는 것 외에 방법이 없음(검증을
-검증하는 무한회귀를 피하기 위한 의도적 트레이드오프). `flagged`/
-`check_failed`는 능동적으로 알리므로 이 한계에서 제외된다.
+경우는 실시간으로 못 잡음 — "검증을 검증하는" 상위 검증을 또 두면 같은
+문제가 무한히 반복되기 때문(의도적 트레이드오프). 다운스트림에서 실제 값이
+그 통과 기록과 어긋나야(예: 다음 라운드 실적이나 실제 배송 결과와 크게
+벗어남) 사후적으로만 발견되고, 발견 즉시 자동 재처리하지 않고
+`escalation_records`로 사람에게 간다(이 시점엔 어느 validation agent가 왜
+틀렸는지 자체를 신뢰할 수 없으므로). `flagged`/`check_failed`는 능동적으로
+알리므로 이 한계에서 제외된다.
 
 ## 상호작용 세 가지 유형
 
@@ -149,15 +177,10 @@ GRAPH_FLOW.md·AGENT_NODE_LIST.md 참고.
   예외 경로 — 평소엔 아예 열리지 않는다. infeasible은 "숫자를 조금씩
   좁혀가며 밀당"할 대상이 아니라 "선택이 틀렸을 수 있으니 다시 하라"는
   신호이므로, 새 라운드 메커니즘을 만들지 않고 forecast agent 자신의
-  내부 재실행 메커니즘(원래 analysis↔forecast 두 agent 사이에서 쓰던
-  것 — 지금은 통합돼 forecast agent 내부 로직이다, STATE_SCHEMA.md
-  `forecast_agents` "되돌림" 참고)을 그대로 재사용한다. `suspected_cause`에
-  따라 재개 지점이 다름:
-  - "데이터 소스 문제" → 데이터 수집부터 재실행
-  - "모델 선택 문제" → 모델 선택 단계부터 재실행(수집된 데이터는 재사용,
-    이후 시나리오 계산·후보 선택은 전부 다시 돎)
+  내부 재실행 메커니즘을 그대로 재사용한다. `suspected_cause`에 따른 재개
+  지점과 대응은 AGENT_NODE_LIST.md forecast agent "되돌림" 참고.
 - **최적화** (forecast→supply_coordination 정방향, 평소 경로): forecast가
-  선택한 candidate 값을 supply_coordination이 우선순위 점수 산출 후
+  선택한 시나리오(`selected_scenario`)의 예측값을 supply_coordination이 우선순위 점수 산출 후
   `allocation_candidate`로 생성하는 **단방향 전달** — 라운드가 쌓이지
   않는다. 상대의 응답을 받아 값을 조정하는 절차가 아니라 한 번의 계산으로
   끝나므로 "협상"이 아니다. 다만 이건 **협상 응답(값 조정)이 없다는
@@ -183,17 +206,29 @@ GRAPH_FLOW.md·AGENT_NODE_LIST.md 참고.
 되돌아가고, `check_failed`면 다음 소비자가 그 레코드를 걸러낸다(위
 "검증agent" 참고).
 
+## 공급망계획agent 연결 구조 — hub-and-spoke, 사슬(chain) 아님
+
+supply_coordination은 procurement_plan·production_plan·logistics_plan agent
+셋 모두와 **개별적으로 직접** 연결된다. "조달→생산→배송"은 한 라운드
+안에서 의존관계에 따른 **호출 순서**일 뿐, 구조적 강제가 아니다 — 그래서:
+- 배송계획에서 문제 발생 시 생산계획을 거치지 않고 조달계획이나
+  supply_coordination으로 바로 되돌아갈 수 있음
+- 이번 요청에 생산 단계가 필요 없으면 건너뛸 수 있음
+  (`allocation_candidates[i].required_stages`로 명시)
+
 ## 엣지 표
 
 | edge | 유형 | 반복 여부 | 종료조건 | escalation 대상 |
 |---|---|---|---|---|
-| forecast → supply_coordination (정방향, 평소) | 단방향 전달(최적화) | 아니오 | forecast가 선택한 candidate 값을 우선순위 점수 산출 후 allocation_candidate로 생성 | 없음 |
-| supply_coordination → forecast (역방향, 예외) | 핸드오프형 — 공급망계획agent(procurement_plan 등)가 infeasible을 보냈을 때만 열림 | 아니오 | 재실행 완료(재개 지점부터) | 없음(forecast 자신의 후보 선택 판단3계층 — ③ 사람 escalation 포함 — 에 위임) |
+| forecast → supply_coordination (정방향, 평소) | 단방향 전달(최적화) | 아니오 | forecast가 선택한 시나리오(`selected_scenario`)의 예측값을 우선순위 점수 산출 후 allocation_candidate로 생성 | 없음 |
+| supply_coordination → forecast (역방향, 예외) | 핸드오프형 — 공급망계획agent(procurement_plan 등)가 infeasible을 보냈을 때만 열림 | 아니오 | 재실행 완료(재개 지점부터) | 없음(forecast 자신의 시나리오 선택 판단3계층 — ③ 사람 escalation 포함 — 에 위임) |
 | supply_coordination ↔ procurement_plan | 라운드 누적형 | 예 | `response_status: feasible` | max_rounds 소진 → 사람, 또는 공급망조율 판단으로 forecast/채널까지 재확장 |
 | supply_coordination ↔ production_plan | 라운드 누적형 | 예 | 위와 동일 | 위와 동일 |
 | supply_coordination ↔ logistics_plan | 라운드 누적형 | 예 | 위와 동일 | 위와 동일 |
 | supply_coordination → sales_channel | 단방향(출력) | 아니오 | 즉시(배분 결정 반영) | 없음 |
-| sales_channel → forecast | 단방향(입력) | 아니오 | 즉시(실적 데이터 유입) | 없음 |
+| sales_channel → forecast | 단방향(입력) | 아니오 | 즉시(주문 이력·POS·프로모션 일정·계약 조건 유입, 주기 스냅샷 기준) | 없음 |
+| human_input → supply_coordination | 단방향(입력) — forecast를 거치지 않는 수량 | 아니오 | 즉시(배분 대상에 포함) | 없음 |
+| forecast → human_manager | 단방향(알림) — 진행을 멈추지 않음 | 아니오 | 즉시(알림 전달) | 없음 |
 | 작성 agent → validation agent(들) | 판정(라우팅 권한 없음) | 아니오 | `passed`/`flagged`/`check_failed` 판정 | check_failed 반복 시 사람(시스템 장애 사유) |
 | escalation_trigger → human_manager | 단방향 | 아니오 | 사람의 resolution 입력 | (최종 단계) |
 
@@ -209,9 +244,9 @@ edge로 승격.
 새로운 "복수 인스턴스" 역할이 생길 때마다 매번 다시 고민하지 않도록,
 기준을 정리:
 
-- **지속되는 정체성이 있는 안건**(forecast_agents처럼 "A회사"에 계속
+- **지속되는 정체성이 있는 안건**(forecast_records처럼 "A회사"에 계속
   매임) → **배열 + agent_id**, 각자 자기 정체성에 매인 값을 유지 — 라운드가
-  실제로 쌓이는 필드(`exchanges` 등)가 있으면 이력까지, forecast_agents처럼
+  실제로 쌓이는 필드(`exchanges` 등)가 있으면 이력까지, forecast_records처럼
   핸드오프형이면 현재값만(이력은 negotiation_log)
 - **워커풀처럼 아무나 다음 안건을 집어가는 경우**(validation agent들,
   또는 조달담당자가 여러 명으로 쪼개지는 미래 시나리오) → **별도 배열

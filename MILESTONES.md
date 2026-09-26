@@ -47,8 +47,8 @@ edge(예: plan agent 간 직접 상호작용, M5/M8에서 미확정으로 남긴
 검증agent 코드는 손대지 않고 `interaction_protocol`에 항목만 추가하면 되어야 한다.
 
 **2. 규칙 기반 판단 스텁은 LLM 구조화 출력과 동일한 pydantic 스키마로 반환한다(M1부터
-적용, M7에서 교체).** forecast(통합된 예측 agent)의 후보 선택·model_selection·
-data_source_basis 판단, supply_coordination의 우선순위 판단, plan agent의
+적용, M7에서 교체).** forecast(통합된 예측 agent)의 시나리오 정의·데이터 소스 판단·
+forecast_method 선택·발생 가능성 평가·시나리오 선택, supply_coordination의 우선순위 판단, plan agent의
 feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은, 지금 규칙 기반으로
 구현하더라도 `{판단값, 근거}` 형태의 공통 pydantic 모델을 반환하게 만든다. M7에서는
 이 스텁 함수의 내부 구현만 Gemini 구조화 출력 호출로 교체하고, 호출부(인터페이스)는
@@ -116,23 +116,52 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
 - DESIGN.md 갱신: "진행 상황"에 M1 요약 추가.
 
 ### M2 — forecast agent 실물 판단 로직 구현 (스텁 제거)
-- M1에서 하드코딩된 candidate 3개(a/b/c)를 반환하던 스텁을 실물 판단 로직으로
-  교체한다 — **공통 규칙 2**에 따라 반환 스키마는 그대로 두고 내부 구현만 바꾼다.
-- **데이터 소스 판단**: (company_id, item_id) 인스턴스별로 자사 이력이
-  존재/충분한지 확인하는 규칙(예: 최소 관측치 수) → 부족하면 유사 사례로
-  대체하는 로직을 규칙 기반으로 구현.
-- **모델 선택**: 계절성/간헐수요 등 데이터 특성에 따라 통계기법을 고르는 규칙
-  기반 판단 구현(LLM 연동은 M7).
-- **데이터**: 로컬 고정 샘플 데이터 사용(Kaggle Store Item Demand·SynDelay·
-  업계 KPI 실연동은 M7 — 이 마일스톤은 판단 로직 자체 검증이 목적).
+- M1의 하드코딩 스텁을 실물 판단 로직으로 교체한다. 입력·내부 단계·되돌림은
+  AGENT_NODE_LIST.md forecast agent, 필드는 STATE_SCHEMA.md `forecast_records`
+  기준으로 구현한다.
+- **스키마 교체**: M1의 임시 스키마를 STATE_SCHEMA.md의 확정 스키마로 바꾼다
+  (`forecast_agents`→`forecast_records`, `company_id` 필수,
+  `data_source_basis`→`data_sources`/`excluded_sources`/`cleaning`,
+  `model_selection`→`forecast_method`, `candidates`→`scenarios`,
+  `selected`→`selected_scenario`, `suspected_cause` 문자열→구조, 알림용
+  `interaction_protocol` 항목 추가). **공통 규칙 2**는 이 확정 스키마 기준으로
+  적용한다.
+- 모든 판단은 규칙 기반(LLM 연동은 M7). 시나리오 정의도 규칙이 채운다
+  (`defined_by: "rule"`).
+- 계약 조건 중 **최소 구매 약정**(하한 적용·시나리오 추가·알림)까지 구현한다.
+  MOQ의 배분 적용은 M4, 공급 보장 물량은 M5.
+- 되돌림: M1의 재개 지점 분기를 유지하되, 판단 함수에 되돌림 사유가
+  전달되도록 확장하고 `scenario` 사유(1단계부터 재실행)를 추가한다.
+- 시나리오 검증 조건은 순수 함수로 구현한다(검증agent 연결은 M3).
+- 규칙이 확신하지 못하는 "애매함" 표시 기준은 구현 시 제안받아 검토한다.
+- 데이터: 로컬 고정 샘플(AGENT_NODE_LIST.md "외부 경계"·sales_channel 기준 —
+  공개 POS 일부 + 수주 생성기로 만든 주문 이력 + 시장 데이터 대리값). 주문
+  이력에는 첫 주문·프로모션 기간 표시를 넣는다. 예측기법 선택 검증에 필요한
+  특성(계절성, 간헐수요, 짧은 이력)이 샘플에 없으면 가공 시리즈를 추가하고
+  합성임을 표시. 전체 규모 연동은 M7.
+- 라이브러리 선택은 구현 시 제안.
 
 **검증**
-- 자사 이력이 부족한 인스턴스는 `data_source_basis: "similar_companies"`로,
-  충분한 인스턴스는 `"own_company"`로 판정되는지.
-- 데이터 특성이 다른 두 인스턴스가 서로 다른 `model_selection` 값을 받는지
+- 되돌림: 같은 스냅샷에서 `suspected_cause`가 주어지면 직전과 **다른** 결과가
+  나오는지(사유별 대응표의 각 행), 사유 없이 같은 입력이면 **같은** 결과가
+  나오는지(결정론). 선택지 소진 시 escalation으로 가는지.
+- 데이터 소스: 이력이 짧은 인스턴스(예: 신제품이 막 들어온 고객사·item)는
+  보강 소스가 추가되고, 충분한 인스턴스는 기본 데이터만 쓰는지. 오염은
+  `cleaning`에, 관련 없는 소스는 `excluded_sources`에, 구조 변화·첫 주문은
+  `use_from`에 기록되는지.
+- 데이터 특성이 다른 두 인스턴스가 서로 다른 `forecast_method`를 받는지
   (하드코딩된 스텁과 달리 실제 입력에 반응하는지).
-- 반환 스키마가 스텁일 때와 동일한 pydantic 모델인지(공통 규칙 2, M7 교체 대비).
-- DESIGN.md 갱신: "진행 상황"에 M2 요약 추가.
+- 시나리오: 시장 데이터에서 관측된 방향 수에 따라 시나리오 개수가 달라지는지,
+  `likelihood` 합이 1인지, 가정이 여러 개인 시나리오도 `value`·
+  `cost_estimate`가 하나씩인지. 프로모션 이력이 없으면 `event` 가정이 들어가지
+  않는지. 시나리오 검증 조건 함수가 위반 케이스를 잡아내는지.
+- 최소 구매 약정: 구속력 있으면 선택값이 약정 잔여량 이상인지, 구속력 없으면
+  "약정대로 산다" 시나리오가 추가되는지. 같은 차이에서 구속력 없는 쪽만
+  알림이 나가는 경우를 재현하고, 알림 후에도 진행이 멈추지 않는지.
+- 반환 스키마가 공통 pydantic 모델(`{판단값, 근거}`)인지(공통 규칙 2, M7 교체 대비).
+- DESIGN.md 갱신: "진행 상황"에 M2 요약, 데이터 대체 가정(store→고객사 매핑,
+  POS 상품을 우리 제품으로 간주, 생성 수주 데이터, 비용 단가 가정값) 명시.
+  JOURNAL.md에 스키마 변경 사유 기록.
 
 ### M3 — 검증agent (interaction_protocol 기반 일반화, 라우팅 권한 없음)
 - 도메인 검증 agent 1개(예: `forecast_validation`)를 이벤트 트리거 워커풀로 구현.
@@ -181,6 +210,10 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
 - 우선순위 tier 1(revenue_impact)·tier 3(aging 하한선)·tier 4(배분량 산출)만 구현,
   tier 2(forecast_reliability)는 SQLite가 필요하므로 M6까지 스텁(**공통 규칙 2** 적용).
 - 여러 회사가 공유 `capacity_pools`를 실제로 경합하는 상황 구성.
+- forecast를 거치지 않는 수요(human_input — 새 고객사 첫 주문, 신제품 첫 물량,
+  프로모션 이력이 없는 고객사·item의 프로모션 수량)의 `allocation_candidates`
+  반영 구조(`demand_id`/`source` 등, 고객사 지정은 선택) 확정·구현.
+- MOQ: 배분량을 고객사별 최소 주문 수량 단위에 맞추는 규칙 구현.
 
 **검증**
 - 3개 이상 인스턴스 동시 실행 시 한 인스턴스가 응답을 기다리는 동안 다른 인스턴스가 실제로
@@ -195,14 +228,17 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
 - 세 plan agent를 hub-and-spoke로 연결, 판단은 시드 고정 RNG로 infeasible을 발생시키는
   규칙 기반부터 시작(**공통 규칙 2** 적용, 업계 KPI 분포 샘플링 정교화는 M7).
 - `required_stages`로 단계 스킵, `exchanges[]` 라운드 누적, `response_status` 종료조건.
+- 고객사별 공급 보장 물량을 배분 시 우선 확보하고, capacity 부족으로 채우지
+  못하면 escalation — escalation이 sales_channel "조정 불가" 통지보다 먼저
+  나가는 순서 확정·구현.
 - **plan agent 간 직접 상호작용(미확정 사항)은 건드리지 않고, 반드시 supply_coordination
   경유로만 구현.** M3에서 만든 일반화 게이트 덕분에, 향후 이 상호작용을 열기로 결정하면
   `interaction_protocol`에 항목만 추가하면 됨(공통 규칙 1).
 - plan agent가 infeasible을 보내면 supply_coordination이 forecast로 역방향
   되돌림을 연다(GRAPH_FLOW.md "상호작용 세 가지 유형" 참고, 핸드오프형) —
-  M1에서 구현한 되돌림 메커니즘(데이터 소스 문제/모델 선택 문제)을 그대로
+  M1~M2에서 구현한 되돌림 메커니즘(`suspected_cause` 구조)을 그대로
   재사용한다. 트리거 조건만 procurement_plan 등의 infeasible 응답으로
-  바뀔 뿐, 재실행 지점(데이터 소스 문제/모델 선택 문제 중 무엇인지)만
+  바뀔 뿐, `suspected_cause`(type·issue·source)만
   정해지면 된다 — 새 라운드/escalation 로직은 필요 없다. `repeat_escalation_threshold`는
   이 엣지(핸드오프형, 라운드 없음)에는 해당 없음 — 여전히 라운드형인
   `supply_coordination↔procurement_plan` 등에서만 쓰인다.
@@ -240,12 +276,13 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
 
 ### M7 — LLM 판단 계층 통합 + 실데이터 연동 강화
 - google-genai(Gemini) 구조화 출력을 판단③계층 중 ②(agent판단)가 필요한 지점에 연결:
-  forecast tier 2, 애매한 model_selection, validator의 근거 타당성 판단, supply_coordination
+  forecast tier 2, 시나리오 정의(`defined_by: "agent_judgment"`, 실패 시 규칙
+  fallback)·발생 가능성 평가·애매한 forecast_method·애매한 시나리오 선택, validator의 근거 타당성 판단, supply_coordination
   후보안 판단(순수 함수 여부는 여기서 실제로 구현하며 최종 결정 — 미확정 사항 해소).
   **공통 규칙 2** 덕분에 M1~M6에서 만든 스텁들의 반환 스키마가 이미 동일하므로, 내부
   구현만 Gemini 호출로 교체하고 호출부는 변경하지 않는다.
-- Langfuse 트레이싱 연결, Kaggle Store Item Demand·SynDelay·업계 KPI 분포 샘플링을
-  실제로 연동(M2/M5의 로컬 고정 샘플 대체).
+- Langfuse 트레이싱 연결, 고객사 POS 전체 데이터·생성 수주 데이터·시장 데이터·
+  SynDelay·업계 KPI 분포 샘플링을 전체 규모로 연동(M2/M5의 로컬 고정 샘플 대체).
 
 **검증**
 - 확실한 케이스는 LLM 호출 없이 규칙만으로 처리되고 애매한 케이스만 LLM이 호출되는지
@@ -280,7 +317,8 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
 - supply_coordination 우선순위 점수 산출의 순수함수/판단 여부 → M7에서 해소.
 - STATE_SCHEMA.md의 `execution_records[]` 분리 설계 → 이번 마일스톤 범위 밖(그래프 노드가
   아닌 외부 경계이므로 실행 layer를 agent화하기 전까지는 다루지 않음).
-- 집계(company_id=null) 인스턴스 → 회사별 인스턴스 전환 로직 → 배정 마일스톤 미정.
-- 새 고객사 human_input의 allocation_candidates 반영 구조(demand_id/source) → 배정 마일스톤 미정.
-- 계약 물량 미충족 시 escalation ↔ sales_channel 통지 순서 → M5에서 확정.
+- forecast를 거치지 않는 수요(human_input)의 allocation_candidates 반영 구조 → M4.
+- forecast 세부(시장 데이터 출처와 카테고리 매핑, POS 데이터셋 확정, 비용 단가
+  가정값) → M2 진행 중 확정.
+- 공급 보장 물량 미충족 시 escalation ↔ sales_channel 통지 순서 → M5에서 확정.
 - capacity_pools 집계 수준의 적절성 → M5에서 negotiation_log로 실증 확인.
