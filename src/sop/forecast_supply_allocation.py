@@ -1,7 +1,7 @@
 """forecast agent → supply_coordination agent 단방향 최적화 배분 (M1).
 
 GRAPH_FLOW.md "상호작용 세 가지 유형"의 "최적화"에 해당하는 정방향 edge —
-forecast가 선택한 candidate 값을 그대로 담아 supply_coordination이
+forecast가 선택한 시나리오 값을 그대로 담아 supply_coordination이
 `allocation_candidate` 하나를 생성한다. 라운드도, capacity 비교도, 응답
 대기도 없다(우선순위 점수 산출은 (회사,item) 인스턴스가 1개뿐이라 경쟁
 자체가 없어 이 마일스톤에서는 값을 그대로 반영하는 것으로 근사 — 실제
@@ -10,40 +10,40 @@ forecast가 선택한 candidate 값을 그대로 담아 supply_coordination이
 역방향(supply_coordination→forecast, plan agent의 infeasible이 트리거하는
 핸드오프)은 plan agent 자체가 아직 없어(M5) 이 모듈에서 다루지 않는다.
 
-`run_forecast_select_and_allocate`가 candidate 선택
-(`forecast_candidate_selection.py`) → 이 배분 생성까지 잇는 상위 진입점이다.
-forecast_agents 인스턴스는 리스트 순서가 아니라 (company_id, item_id)로
-식별한다(STATE_SCHEMA.md "forecast_agents[]" — agent_id는 표시용 합성키일
-뿐 조회 키가 아니다) — `_find_forecast_agent_index`가 그 조회를 담당한다.
+`run_forecast_select_and_allocate`가 시나리오 선택
+(`forecast_scenario_selection.py`) → 이 배분 생성까지 잇는 상위 진입점이다.
+forecast_records 인스턴스는 리스트 순서가 아니라 (company_id, item_id)로
+식별한다(STATE_SCHEMA.md "forecast_records[]" — agent_id는 표시용 합성키일
+뿐 조회 키가 아니다) — `_find_forecast_record_index`가 그 조회를 담당한다.
 """
 
 from .access import StateStore
-from .forecast_candidate_selection import select_forecast_candidate
+from .forecast_scenario_selection import select_forecast_scenario
 from .ids import new_id, now_iso
-from .state import AllocationCandidate, ForecastCandidate, NegotiationLogEntry
+from .state import AllocationCandidate, NegotiationLogEntry, Scenario
 
 
-def _find_forecast_agent_index(
-    store: StateStore, role_tag: str, company_id: str | None, item_id: str
+def _find_forecast_record_index(
+    store: StateStore, role_tag: str, company_id: str, item_id: str
 ) -> int:
-    """(company_id, item_id)에 일치하는 forecast_agents 인스턴스의 리스트 인덱스를 찾는다.
+    """(company_id, item_id)에 일치하는 forecast_records 인스턴스의 리스트 인덱스를 찾는다.
 
     한 회사가 여러 item을 동시에 주문할 수 있어(예: 라면과 과자) 인스턴스
     단위는 회사 하나가 아니라 (company_id, item_id) 조합이다 — 조회도 이
     조합으로 해야, 항목 순서가 바뀌거나 다른 인스턴스가 먼저/나중에
     처리돼도 엉뚱한 인스턴스를 건드리지 않는다.
     """
-    agents = store.get_field(role_tag, "forecast_agents")
-    for index, agent in enumerate(agents):
-        if agent.company_id == company_id and agent.item_id == item_id:
+    records = store.get_field(role_tag, "forecast_records")
+    for index, record in enumerate(records):
+        if record.company_id == company_id and record.item_id == item_id:
             return index
     raise ValueError(
-        f"forecast_agents에 company_id={company_id!r}, item_id={item_id!r} 인스턴스가 없음"
+        f"forecast_records에 company_id={company_id!r}, item_id={item_id!r} 인스턴스가 없음"
     )
 
 
 def allocate_forecast_candidate(forecast_agent_id: str, value: float) -> AllocationCandidate:
-    """forecast가 선택한 candidate 값을 그대로 담아 allocation_candidate 1개를 생성.
+    """forecast가 선택한 시나리오 값을 그대로 담아 allocation_candidate 1개를 생성.
 
     우선순위 점수 산출은 회사가 1개뿐이라 경쟁 자체가 없어(M4에서 실제
     다회사 경쟁 로직 구현), 이번 마일스톤에서는 supply_coordination의
@@ -69,29 +69,29 @@ async def run_forecast_select_and_allocate(
     store: StateStore,
     forecast_role_tag: str,
     supply_role_tag: str,
-    company_id: str | None,
+    company_id: str,
     item_id: str,
-    candidates: list[ForecastCandidate],
+    scenarios: list[Scenario],
 ) -> AllocationCandidate:
-    """analysis 스텁의 candidate 중 하나를 forecast가 선택한 뒤, 그 값을 그대로
+    """시나리오 중 하나를 forecast가 선택한 뒤, 그 값을 그대로
     담아 supply_coordination이 `allocation_candidate`를 생성하는 M1 진입점
     (단방향 최적화, 라운드 없음). 인스턴스는 (company_id, item_id)로 지정한다."""
-    selection = select_forecast_candidate(candidates)
+    selection = select_forecast_scenario(scenarios)
 
-    agent_index = _find_forecast_agent_index(store, forecast_role_tag, company_id, item_id)
-    agent = store.get_field(forecast_role_tag, f"forecast_agents[{agent_index}]")
-    updated_agent = agent.model_copy(
-        update={"selected": selection.judgment["selected"], "selection_basis": "rule"}
+    record_index = _find_forecast_record_index(store, forecast_role_tag, company_id, item_id)
+    record = store.get_field(forecast_role_tag, f"forecast_records[{record_index}]")
+    updated_record = record.model_copy(
+        update={"selected_scenario": selection.judgment["selected"], "selection_basis": "rule"}
     )
     store.set_field(
         forecast_role_tag,
-        f"forecast_agents[{agent_index}]",
-        updated_agent,
-        notify_channel="forecast_agents",
+        f"forecast_records[{record_index}]",
+        updated_record,
+        notify_channel="forecast_records",
     )
-    _append_log(store, forecast_role_tag, f"candidate_selected_{selection.judgment['selected']}")
+    _append_log(store, forecast_role_tag, f"scenario_selected_{selection.judgment['selected']}")
 
-    candidate = allocate_forecast_candidate(agent.agent_id, selection.judgment["value"])
+    candidate = allocate_forecast_candidate(record.agent_id, selection.judgment["value"])
     store.set_field(
         supply_role_tag,
         "allocation_candidates",

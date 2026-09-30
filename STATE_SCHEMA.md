@@ -111,6 +111,9 @@ suspected_cause: {
   "근거가 실제로 수집된 데이터에 있는가"를 바로 확인할 수 있게 한다.
 - `defined_by`는 시나리오를 규칙이 만들었는지(`"rule"`) agent 판단이
   만들었는지(`"agent_judgment"`)를 기록한다.
+- `value`, `forecast_uncertainty`, `likelihood`, `cost_estimate`는 시나리오를 처음
+  정의한 직후에는 비어 있고, 예측 계산과 발생 가능성 평가 단계에서 채워진다.
+  값이 비어 있는 시나리오는 시나리오 선택의 대상이 아니다.
 - `likelihood`는 한 인스턴스의 시나리오들끼리 합이 1이 되도록 맞춘다.
 - `cost_estimate`에 쓰는 단위당 과잉 비용·부족 비용은 공급가·제조원가 등
   원가 입력에서 계산하는 파생값이다(원가 입력과 계산식은 AGENT_NODE_LIST.md

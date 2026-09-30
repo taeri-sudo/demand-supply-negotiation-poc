@@ -292,7 +292,7 @@ asyncio 태스크로 서로 안 막히고 진행, "이벤트 워커풀"은 트�
     | MEATS, POULTRY, SEAFOOD | 식품 가공 | D151 |
     | DAIRY | 식품 가공 | D152 |
     | BREAD/BAKERY, PREPARED FOODS | 식품 가공 | D154 |
-    | GROCERY I, FROZEN FOODS, DELI | 식품 가공 | 식품 가공 전체(D151~D154 합산) — 상품군 안에 여러 그룹이 섞여 있고 세부 분류 설명이 없어 나눌 수 없음 |
+    | GROCERY I, FROZEN FOODS, DELI | 식품 가공 | 식품 가공 전체 흐름(D151, D152, D153, D154의 월별 변화율을 단순 평균) — 상품군 안에 여러 그룹이 섞여 있고 세부 분류 설명이 없어 나눌 수 없음. 실제 비중을 알 수 없어 단순 평균을 쓴 한계는 DESIGN.md 참고 |
     | BEVERAGES | 음료(비주류) | D155 |
     | LIQUOR,WINE,BEER | 음료(주류) | D155 — 주류·비주류가 한 그룹이라 두 업종에 같은 값 |
     | PRODUCE, EGGS, CELEBRATION, GROCERY II, 그 외 비식품 | 범위 밖 | — |

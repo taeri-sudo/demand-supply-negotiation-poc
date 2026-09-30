@@ -320,3 +320,44 @@ capacity_pools fixture(이 연결 로직과 무관하게 Lock/권한만 검증�
 인자에 의존하고 있어 그대로 두면 깨지는 게 맞는 변경이었다 —
 `make_store`/세 테스트를 (company_id, item_id) 인자로 갱신했고, 새
 테스트 1건을 더해 13건 모두 통과 확인.
+
+---
+
+## 2026-09-30 — M2 1단계: forecast_records 스키마 교체 중 내린 판단
+
+Claude Code가 `state.py`를 STATE_SCHEMA.md 확정 스키마(`forecast_records`)로
+교체하면서, 문서가 정하지 않은 부분에서 다음을 택했다.
+
+**시나리오 선택 규칙을 confidence 최댓값에서 `cost_estimate` 최솟값으로 교체(채택)**:
+M1의 `select_forecast_candidate`는 candidate의 `confidence`가 가장 높은 것을
+골랐는데, 확정 스키마의 `Scenario`에는 `confidence` 필드가 없다.
+AGENT_NODE_LIST.md 6단계 ①이 정한 규칙(`cost_estimate` 최저)을 그대로
+쓰는 것이 스텁이 문서와 같은 규칙을 갖게 되는 방향이라 그쪽을 택했다.
+**대안(기각) — `Scenario`에 `confidence` 필드를 남겨 M1 규칙 유지**:
+`likelihood`(그 시나리오가 실제로 일어날 가능성)와 `confidence`(candidate
+신뢰도)는 다른 개념인데, 스키마에 후자를 남기면 문서에 없는 필드가 M2 내내
+따라다니고 4단계에서 ①규칙을 다시 `cost_estimate` 기준으로 고쳐야 한다.
+같은 이유로 모듈·함수명의 "candidate"도 "scenario"로 바꿨다
+(`forecast_scenario_selection.py`, `select_forecast_scenario`).
+
+**`Scenario`의 `value`/`forecast_uncertainty`/`likelihood`/`cost_estimate`를 선택
+필드로 둠(채택)**: 시나리오 정의(내부 1단계)는 가정만 정하고 예측값·발생
+가능성·비용은 4, 5단계가 채운다. 필수로 두면 1단계의 결과를 State에
+표현하려고 placeholder 값을 넣어야 한다(2026-09-23 엔트리의
+`linked_pool_key`를 선택 필드로 둔 것과 같은 논리). 대신 값이 비어 있는
+시나리오를 `select_forecast_scenario`에 넘기면 `ValueError`로 거부해, 계산
+전 시나리오가 선택 대상이 되는 경우를 막았다.
+
+**`SuspectedCause`에 type별 issue 조합 검증을 모델 안에 둠(채택)**: STATE_SCHEMA.md는
+type별 issue를 표로만 정했다. 이 구조를 보내는 쪽이 검증agent(M3)와
+supply_coordination(M5) 둘이고 받는 쪽은 forecast 하나라, 조합 오류를 각
+송신자 코드에서 따로 막는 것보다 State에 들어가는 지점(pydantic 모델)에서
+한 번에 막는 편이 두 곳의 확인 로직이 어긋날 여지를 없앤다. type이
+`scenario`인데 issue가 `contaminated`인 식의 조합, issue가 빠진
+`scenario`/`data_source`, issue가 있는 `forecast_method`는 모두 거부된다.
+
+**statsforecast 도입에 따른 pandas 다운그레이드를 택함(채택)**: statsforecast가
+`pandas<3.0`을 요구해, 프로젝트가 고정해 둔 pandas 3.0.5를 2.3.3으로
+낮췄다. 현재 `src/`는 pandas를 쓰지 않아 영향받는 코드가 없었고, Python 3.13
+환경에서 설치와 실행이 확인돼 Python 버전을 바꾸거나 간헐수요 기법을 직접
+구현하는 우회를 택할 이유가 없었다.
