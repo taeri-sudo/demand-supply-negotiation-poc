@@ -111,9 +111,9 @@ demand-supply-negotiation-poc의 **현재 구현 상태**를 담는 문서. Stat
 - **role_permissions에 `w`만 있고 대응하는 `r`이 없는 조합을 막을지**:
   지금 코드(`access.py`)는 이 조합을 허용한다. `negotiation_log`/
   `escalation_records`처럼 "기록용 스트림"에 이벤트를 append만 하고, 판단은
-  그 기록을 다시 읽지 않고 현재값 필드(`round_history`/`exchanges` 등)로만
-  하는 역할이라면 w-only가 자연스러울 수 있어(예: forecast가 자기 라운드
-  이벤트를 negotiation_log에 쓰기만 하고 판단엔 round_history를 씀), 항상
+  그 기록을 다시 읽지 않고 현재값 필드(`exchanges` 등)로만
+  하는 역할이라면 w-only가 자연스러울 수 있어(예: supply_coordination이 교환
+  이벤트를 negotiation_log에 쓰기만 하고 판단엔 exchanges를 씀), 항상
   실수(r을 빠뜨린 오탈자)라고 단정할 근거가 아직 없음. 지금은 실제
   agent 코드가 없어 이런 패턴이 나타날지 확인 불가 — M1 이후 실제
   agent별 role_permissions가 채워지면 w-only 조합이 실제로 나타나는지,
@@ -142,10 +142,10 @@ State/설계에는 자리가 있지만 아직 실제 로직이 안 붙은 부분
   붙는 걸로 전제했으나, 그 엣지 성격이 바뀌면서(forecast→supply_coordination은
   라운드 없는 단방향 최적화, supply_coordination→forecast는 핸드오프 —
   GRAPH_FLOW.md 참고) 이 게이트가 정확히 어디에 붙어야 하는지 재정의가
-  필요하다. forecast_reliability 자체는 우선순위 구조 tier 2(STATE_SCHEMA.md
-  "우선순위 구조" 참고 — supply_coordination의 배분 우선순위 산출에 쓰임)로는
-  여전히 유효해 보이지만, walk-forward validation과 SQLite 영속화
-  (STATE_SCHEMA.md "forecast_reliability 산출과 저장")가 아직 없어 어느
+  필요하다. forecast_reliability 자체는 우선순위 구조 tier 2(AGENT_NODE_LIST.md
+  supply_coordination agent "우선순위 점수 산출" 참고 — 배분 우선순위 산출에
+  쓰임)로는 여전히 유효해 보이지만, walk-forward validation과 SQLite 영속화
+  (AGENT_NODE_LIST.md supply_coordination agent "예측 신뢰도 입력")가 아직 없어 어느
   쪽이든 M6 전까지는 구현되지 않는다(MILESTONES.md M6 참고).
 
 ## 확장 지점

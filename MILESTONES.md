@@ -5,11 +5,8 @@
 
 ## Context
 
-CLAUDE.md, STATE_SCHEMA.md, AGENT_NODE_LIST.md, GRAPH_FLOW.md, DESIGN.md를 읽고
-설계를 asyncio 기반 Python 코드로 옮기는 마일스톤 순서를 정리했다. DESIGN.md는
-6개 섹션 전부 TBD 상태이고, 실질 아키텍처 정보는 STATE_SCHEMA/AGENT_NODE_LIST/
-GRAPH_FLOW 세 문서에 분산되어 있다. 이 요청은 **코드 작성이 아니라 순서 설계**이므로,
-아래는 실행 계획이 아니라 각 단계의 범위와 검증 방법을 정리한 참고 자료다.
+STATE_SCHEMA.md·AGENT_NODE_LIST.md·GRAPH_FLOW.md의 설계를 asyncio 기반 Python
+코드로 옮기는 마일스톤 순서와, 각 단계의 범위와 검증 방법을 정리한다.
 
 ## 선행 판단: 인프라를 먼저 만들지, Mock으로 흐름부터 볼지
 
