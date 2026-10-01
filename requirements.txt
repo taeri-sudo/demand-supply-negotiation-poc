@@ -76,3 +76,4 @@ urllib3==2.7.0
 utilsforecast==0.2.16
 websockets==16.1.1
 wrapt==2.4.1
+xlrd==2.0.1
