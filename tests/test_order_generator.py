@@ -1,4 +1,5 @@
 from datetime import date
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -31,7 +32,7 @@ def make_pos(seed=0, mean=20.0, days=400, first="2014-06-01", promo_windows=()):
 
 
 def policy(**overrides):
-    base = dict(company_id="CUST-01", review_days=7, lead_time_days=3, moq=6.0, z=1.28)
+    base: dict[str, Any] = dict(company_id="CUST-01", review_days=7, lead_time_days=3, moq=6.0, z=1.28)
     base.update(overrides)
     return CustomerPolicy(**base)
 
@@ -76,7 +77,7 @@ def test_orders_are_not_a_perfect_mirror_of_pos():
     pos = make_pos()
     orders = orders_for(pos=pos)
 
-    gaps = orders["order_date"].diff().dropna().dt.days
+    gaps = orders["order_date"].diff().dropna().dt.days  # pyright: ignore[reportAttributeAccessIssue] -- pandas-stubs가 diff() 결과(Timedelta)의 .dt 접근을 Series[float]로 추론
     assert gaps.nunique() > 2  # 7일 주기가 흔들리고 일부 점검은 건너뜀
 
     monthly_orders = orders.groupby(orders["order_date"].dt.to_period("M"))["quantity"].sum()

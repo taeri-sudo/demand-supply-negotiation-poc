@@ -66,10 +66,10 @@ def scan_pos(
     true/false/null 세 상태의 boolean이다.
     """
     kept = []
-    reader = pd.read_csv(
+    reader = pd.read_csv(  # pyright: ignore[reportCallIssue] -- pandas-stubs 오버로드가 문자열 dtype 딕셔너리 조합을 인식하지 못함
         train_path,
         usecols=["date", "store_nbr", "item_nbr", "unit_sales", "onpromotion"],
-        dtype=_POS_DTYPES,
+        dtype=_POS_DTYPES,  # pyright: ignore[reportArgumentType] -- pandas-stubs가 "boolean" 같은 문자열 dtype 이름을 허용하지 않음
         parse_dates=["date"],
         chunksize=chunksize,
     )

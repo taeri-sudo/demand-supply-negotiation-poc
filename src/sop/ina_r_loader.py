@@ -13,8 +13,10 @@ M2 4단계 전에 정해진다 — DESIGN.md "아직 결정 안 된 것").
 """
 
 import re
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -48,7 +50,7 @@ def _to_value(cell) -> float:
 
 
 def parse_ina_r_rows(
-    rows: list[list], codes: list[str] | None = None, first_month: date = FIRST_MONTH
+    rows: Sequence[Sequence[Any]], codes: list[str] | None = None, first_month: date = FIRST_MONTH
 ) -> pd.DataFrame:
     """시트 행 목록(헤더 행 포함)을 월 × 코드 지수 표로 바꾼다.
 

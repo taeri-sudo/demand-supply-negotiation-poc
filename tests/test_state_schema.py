@@ -14,6 +14,7 @@ from sop.state import (
     InteractionProtocol,
     NoticeThreshold,
     Scenario,
+    SourceRef,
     State,
     SuspectedCause,
     ValidationResult,
@@ -23,9 +24,9 @@ from sop.state import (
 def test_forecast_record_requires_company_id():
     """company_id는 필수이며 null을 허용하지 않는다."""
     with pytest.raises(ValidationError):
-        ForecastRecord(agent_id="X:RAMEN", item_id="RAMEN")
+        ForecastRecord.model_validate({"agent_id": "X:RAMEN", "item_id": "RAMEN"})
     with pytest.raises(ValidationError):
-        ForecastRecord(agent_id="X:RAMEN", company_id=None, item_id="RAMEN")
+        ForecastRecord.model_validate({"agent_id": "X:RAMEN", "company_id": None, "item_id": "RAMEN"})
 
 
 def test_state_has_forecast_records_and_no_legacy_forecast_agents():
@@ -68,10 +69,12 @@ def test_base_scenario_has_no_assumptions_and_scenario_with_two_assumptions_has_
 def test_driver_rejects_free_text():
     """수요 동인은 데이터가 존재하는 세 값만 허용한다(자유 텍스트 금지)."""
     with pytest.raises(ValidationError):
-        Assumption(
-            driver="weather",
-            demand_effect=0.1,
-            evidence=Evidence(kind="pos", item_scope="same_item"),
+        Assumption.model_validate(
+            {
+                "driver": "weather",
+                "demand_effect": 0.1,
+                "evidence": {"kind": "pos", "item_scope": "same_item"},
+            }
         )
 
 
@@ -84,7 +87,7 @@ def test_kind_and_item_scope_are_independent_and_all_nine_combinations_are_valid
 def test_excluded_source_reason_is_irrelevant_only():
     assert ExcludedSource(kind="market", item_scope="category").reason == "irrelevant"
     with pytest.raises(ValidationError):
-        ExcludedSource(kind="market", item_scope="category", reason="contaminated")
+        ExcludedSource.model_validate({"kind": "market", "item_scope": "category", "reason": "contaminated"})
 
 
 @pytest.mark.parametrize(
@@ -100,10 +103,11 @@ def test_suspected_cause_data_source_accepts_only_data_source_issues(issue):
     cause = SuspectedCause(
         type="data_source",
         issue=issue,
-        source={"kind": "orders", "item_scope": "same_item"},
+        source=SourceRef(kind="orders", item_scope="same_item"),
         use_from=date(2016, 1, 1) if issue == "irrelevant" else None,
     )
     assert cause.issue == issue
+    assert cause.source is not None
     assert cause.source.kind == "orders"
 
 
@@ -128,6 +132,7 @@ def test_validation_result_carries_structured_suspected_cause():
         suspected_cause=SuspectedCause(type="scenario", issue="not_distinct", scenario_id="S-2"),
         validator_role_tag="forecast_validation",
     )
+    assert result.suspected_cause is not None
     assert result.suspected_cause.scenario_id == "S-2"
 
 
@@ -143,6 +148,7 @@ def test_forecast_to_human_manager_notice_protocol_entry():
         notice_threshold=NoticeThreshold(binding=0.2, non_binding=0.05),
     )
     assert entry.max_rounds is None
+    assert entry.notice_threshold is not None
     assert entry.notice_threshold.non_binding < entry.notice_threshold.binding
 
 
@@ -153,4 +159,4 @@ def test_escalation_record_mode_distinguishes_notice_from_intervention():
     assert notice.resolution is None
     assert EscalationRecord(trigger_edge="e", reason="r", status="open").mode == "intervention"
     with pytest.raises(ValidationError):
-        EscalationRecord(trigger_edge="e", reason="r", mode="silent", status="open")
+        EscalationRecord.model_validate({"trigger_edge": "e", "reason": "r", "mode": "silent", "status": "open"})

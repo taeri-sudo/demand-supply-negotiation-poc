@@ -12,6 +12,7 @@ agent 판단 로직은 이 모듈의 함수로만 외부 데이터를 읽는다.
 """
 
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
@@ -96,3 +97,68 @@ def aggregate_monthly_orders(orders: pd.DataFrame, data_end: pd.Timestamp) -> pd
     monthly = pd.DataFrame(rows)
     monthly["promotion"] = pd.array(monthly["promotion"].tolist(), dtype="boolean")
     return complete_months_only(monthly, data_end)
+
+
+def load_similar_items(data_dir: str | Path | None = None) -> pd.DataFrame:
+    """인스턴스별 비슷한 제품(같은 고객사, 같은 class) 연결: company_id, item_id, similar_item_id."""
+    return pd.read_csv(_dir(data_dir) / "similar_items.csv")
+
+
+@dataclass
+class InstanceInputs:
+    """forecast agent 한 인스턴스((회사, item))가 데이터 수집 단계에서 받는 입력 묶음.
+
+    `market_index`는 시장 데이터(월별 지수 수준 시리즈)이며 물가 보정까지 끝난 값을 호출자가 넘긴다.
+    없으면 None이다.
+    """
+
+    company_id: str
+    item_id: str
+    family: str
+    industry: str
+    perishable: bool
+    data_end: pd.Timestamp
+    orders: pd.DataFrame  # order_date, quantity, is_first_order, promotion
+    pos_same: pd.DataFrame  # date, quantity, promotion — 같은 고객사·같은 item
+    pos_similar: pd.DataFrame  # date, item_id, quantity, promotion — 비슷한 제품
+    pos_category: pd.DataFrame  # month, quantity — 같은 고객사·같은 상품군(완전한 달)
+    market_index: pd.Series | None = None
+    refs: dict = field(default_factory=dict)
+
+
+def load_instance_inputs(
+    company_id: str,
+    item_id: str,
+    data_dir: str | Path | None = None,
+    market_index: pd.Series | None = None,
+) -> InstanceInputs:
+    """고정 샘플에서 한 인스턴스의 입력을 읽는다. 인스턴스가 샘플에 없으면 KeyError."""
+    instances = load_instances(data_dir)
+    row = instances[(instances["company_id"] == company_id) & (instances["item_id"] == item_id)]
+    if row.empty:
+        raise KeyError(f"샘플에 없는 인스턴스: {company_id}/{item_id}")
+    row = row.iloc[0]
+    orders = load_orders(data_dir)
+    orders = orders[(orders["company_id"] == company_id) & (orders["item_id"] == item_id)]
+    pos = load_pos_daily(data_dir)
+    same = pos[(pos["company_id"] == company_id) & (pos["item_id"] == item_id) & (pos["role"] == "target")]
+    similar_ids = load_similar_items(data_dir)
+    similar_ids = similar_ids[
+        (similar_ids["company_id"] == company_id) & (similar_ids["item_id"] == item_id)
+    ]["similar_item_id"]
+    similar = pos[(pos["company_id"] == company_id) & pos["item_id"].isin(set(similar_ids))]
+    category = load_pos_category_monthly(data_dir)
+    category = category[(category["company_id"] == company_id) & (category["family"] == row["family"])]
+    return InstanceInputs(
+        company_id=company_id,
+        item_id=item_id,
+        family=row["family"],
+        industry=row["industry"],
+        perishable=bool(row["perishable"]),
+        data_end=load_data_end(data_dir),
+        orders=orders[["order_date", "quantity", "is_first_order", "promotion"]].reset_index(drop=True),
+        pos_same=same[["date", "quantity", "promotion"]].reset_index(drop=True),
+        pos_similar=similar[["date", "item_id", "quantity", "promotion"]].reset_index(drop=True),
+        pos_category=category[["month", "quantity"]].reset_index(drop=True),
+        market_index=market_index,
+    )

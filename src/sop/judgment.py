@@ -10,7 +10,13 @@ from pydantic import BaseModel
 
 
 class StructuredJudgment(BaseModel):
-    """판단값 + 근거. `judgment`는 판단 종류마다 다른 자유 dict."""
+    """판단값 + 근거. `judgment`는 판단 종류마다 다른 자유 dict.
+
+    규칙이 확신하지 못하는 판단은 `ambiguous`로 표시한다. 표시하더라도 규칙대로 선택한
+    결과가 `judgment`에 들어 있다(AGENT_NODE_LIST.md "애매함" — 표시 후 규칙대로 진행).
+    """
 
     judgment: dict
     reasoning: str
+    ambiguous: bool = False
+    ambiguity_reason: str | None = None

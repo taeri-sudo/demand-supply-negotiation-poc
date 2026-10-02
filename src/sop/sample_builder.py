@@ -160,7 +160,7 @@ def choose_pairs(metrics: pd.DataFrame, items: pd.DataFrame, plan=PLAN) -> list[
         pool = _rank(long_history[long_history["family"] == fam], trait)
         picked = 0
         for row in pool.itertuples():
-            key = (int(row.store_nbr), int(row.item_nbr))
+            key = (int(row.store_nbr), int(row.item_nbr))  # pyright: ignore[reportArgumentType] -- itertuples 값이 Scalar로 추론되나 실제는 정수
             if key in taken:
                 continue
             taken.add(key)
@@ -198,19 +198,20 @@ def add_late_contract_pairs(chosen: list[dict], metrics: pd.DataFrame) -> list[d
     return [*chosen, *extras]
 
 
-def similar_items(chosen: list[dict], items: pd.DataFrame, monthly: pd.DataFrame) -> set[tuple[int, int]]:
-    """각 인스턴스와 같은 매장·같은 class에서 판매량이 큰 다른 상품(보강용 similar_item POS)."""
+def similar_items(
+    chosen: list[dict], items: pd.DataFrame, monthly: pd.DataFrame
+) -> dict[tuple[int, int], list[int]]:
+    """각 인스턴스(매장, 상품)와 같은 매장·같은 class에서 판매량이 큰 다른 상품(보강용 similar_item POS)."""
     class_of = items.set_index("item_nbr")["class_id"]
     volume = monthly.groupby(["store_nbr", "item_nbr"])["quantity"].sum()
-    result: set[tuple[int, int]] = set()
+    result: dict[tuple[int, int], list[int]] = {}
     for c in chosen:
         store, item = c["store_nbr"], c["item_nbr"]
         same_class = items[(items["class_id"] == class_of[item]) & (items["item_nbr"] != item)]["item_nbr"]
         candidates = [
             (volume.get((store, i), 0.0), i) for i in same_class if (store, i) in volume.index
         ]
-        for _, i in sorted(candidates, reverse=True)[:SIMILAR_ITEMS_PER_TARGET]:
-            result.add((store, int(i)))
+        result[(store, item)] = [int(i) for _, i in sorted(candidates, reverse=True)[:SIMILAR_ITEMS_PER_TARGET]]
     return result
 
 
@@ -239,7 +240,8 @@ def build_sample(
     monthly = monthly_series(daily)
     metrics = pair_metrics(monthly)
     chosen = add_late_contract_pairs(choose_pairs(metrics, items), metrics)
-    extra_pairs = similar_items(chosen, items, monthly)
+    similar_map = similar_items(chosen, items, monthly)
+    extra_pairs = {(store, i) for (store, _), ids in similar_map.items() for i in ids}
     target_pairs = {(c["store_nbr"], c["item_nbr"]) for c in chosen}
 
     keep = target_pairs | extra_pairs
@@ -256,7 +258,7 @@ def build_sample(
         start = c["late_start"] or max(date(2013, 1, 1), first_pos)
         item_id = item_info.loc[c["item_nbr"], "item_id"]
         orders = generate_orders(
-            pos[["date", "quantity", "promotion"]], policy, item_id, start, DATA_END.date(), BASE_SEED
+            pos[["date", "quantity", "promotion"]], policy, item_id, start, DATA_END.date(), BASE_SEED  # pyright: ignore[reportArgumentType] -- .loc 조회값이 Scalar로 추론되나 실제는 str
         )
         order_frames.append(orders)
         instance_rows.append(
@@ -295,6 +297,19 @@ def build_sample(
     category.insert(0, "company_id", category["store_nbr"].map(store_to_company_id))
     category = category.drop(columns=["store_nbr"])
 
+    item_id_of = items.set_index("item_nbr")["item_id"]
+    similar_rows = pd.DataFrame(
+        [
+            {
+                "company_id": store_to_company_id(store),
+                "item_id": item_id_of[target],
+                "similar_item_id": item_id_of[i],
+            }
+            for (store, target), ids in similar_map.items()
+            for i in ids
+        ]
+    )
+
     pos_out = to_boundary_format(kept).sort_values(["company_id", "item_id", "date"])
     pos_out["role"] = [
         "target" if (s, i) in target_pairs else "similar"
@@ -306,6 +321,7 @@ def build_sample(
     _write_csv(category, out_dir / "pos_category_monthly.csv")
     _write_csv(orders_all, out_dir / "orders.csv")
     _write_csv(contracts, out_dir / "contracts.csv")
+    _write_csv(similar_rows, out_dir / "similar_items.csv")
     _write_csv(pd.DataFrame(instance_rows), out_dir / "instances.csv")
     meta = {
         "data_end": DATA_END.date().isoformat(),

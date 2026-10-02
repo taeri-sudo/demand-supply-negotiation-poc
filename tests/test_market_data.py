@@ -152,3 +152,13 @@ def test_exclusion_then_deflation_keeps_each_step_separate():
     assert ex_own.tolist() == pytest.approx([98.0, 108.0, 118.0, 128.0])
     assert real.iloc[0] == pytest.approx(98.0)
     assert real.iloc[1] == pytest.approx(108.0 / 1.05)
+
+
+def test_exclusion_rejects_a_source_built_without_registration_validation():
+    """등록 단계의 검증(includes_own_sales가 true이면 index_unit_amount 필요)은 생성 시 이미 일어난다.
+    그 검증을 우회해 만든 객체(model_construct)에 대해서는 차감 단계가 한국어 메시지로 예외를 낸다."""
+    unchecked = MarketSource.model_construct(name="BYPASS", includes_own_sales=True, index_unit_amount=None)
+    nominal = pd.Series([100.0, 110.0, 120.0, 130.0], index=MONTHS)
+
+    with pytest.raises(ValueError, match="index_unit_amount가 없어"):
+        exclude_own_sales(unchecked, nominal, pd.Series([1000.0] * 4, index=MONTHS))

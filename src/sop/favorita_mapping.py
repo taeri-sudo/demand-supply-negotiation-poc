@@ -40,8 +40,9 @@ class FamilyMapping(BaseModel, frozen=True):
     @property
     def market_groups(self) -> tuple[str, ...]:
         """이 상품군의 시장 흐름을 이루는 INA-R 그룹 코드(제외 상품군은 빈 튜플)."""
-        if self.market_mapping == "single_group":
-            return (self.market_group,)
+        group = self.market_group
+        if self.market_mapping == "single_group" and group is not None:
+            return (group,)
         if self.market_mapping == "food_processing_whole":
             return FOOD_PROCESSING_WHOLE_GROUPS
         return ()

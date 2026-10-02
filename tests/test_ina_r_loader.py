@@ -89,6 +89,7 @@ def test_parse_does_not_compute_change_rates():
 
 @pytest.mark.skipif(INA_R_XLS is None, reason="INA-R 원본(data/raw/ina_r)이 없음")
 def test_real_file_has_d151_to_d155_for_2013_01_to_2017_08():
+    assert INA_R_XLS is not None  # skipif가 파일이 없는 경우를 이미 걸러냄
     codes = ["D151", "D152", "D153", "D154", "D155"]
 
     frame = load_ina_r_index(INA_R_XLS, codes, start="2013-01", end="2017-08")

@@ -15,9 +15,10 @@ from .state import Scenario
 
 
 def select_forecast_scenario(scenarios: list[Scenario]) -> StructuredJudgment:
-    if any(s.cost_estimate is None or s.value is None for s in scenarios):
+    costed = [(s.cost_estimate, s) for s in scenarios if s.cost_estimate is not None and s.value is not None]
+    if len(costed) != len(scenarios):
         raise ValueError("시나리오 선택은 value/cost_estimate 계산이 끝난 시나리오만 받음")
-    best = min(scenarios, key=lambda s: s.cost_estimate)
+    _, best = min(costed, key=lambda pair: pair[0])
     return StructuredJudgment(
         judgment={"selected": best.scenario_id, "value": best.value},
         reasoning=(

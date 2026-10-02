@@ -90,7 +90,10 @@ def exclude_own_sales(
     result = nominal.copy()
     if not source.includes_own_sales:
         return result
-    own_points = own_sales.reindex(nominal.index).fillna(0.0) / source.index_unit_amount
+    unit_amount = source.index_unit_amount
+    if unit_amount is None:  # 등록 단계 검증을 거치지 않고 만든 객체에 대한 방어
+        raise ValueError(f"{source.name}: includes_own_sales가 true인데 index_unit_amount가 없어 차감할 수 없음")
+    own_points = own_sales.reindex(nominal.index).fillna(0.0) / unit_amount
     result = nominal - own_points
     if (result.dropna() <= 0).any():
         raise ValueError(

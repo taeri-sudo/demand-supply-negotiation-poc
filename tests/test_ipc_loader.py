@@ -47,6 +47,7 @@ def test_load_ipc_index_reads_xlsx_and_slices_months(tmp_path):
     path = tmp_path / "ipc.xlsx"
     workbook = openpyxl.Workbook()
     sheet = workbook.active
+    assert sheet is not None
     sheet.title = NATIONAL_SHEET
     for row in rows(["Grupo", "011", "Alimentos", 100.0, 101.0, 102.0]):
         sheet.append(row)
@@ -66,4 +67,4 @@ def test_real_file_covers_2013_01_to_2017_08_for_the_three_industry_groups():
     assert frame.index[-1] == pd.Timestamp("2017-08-01")
     assert frame.notna().all().all()
     # 2014년 기준(2014=100)으로 이어붙인 시리즈라 2014년 평균이 100 근처다
-    assert frame.loc["2014", "011"].mean() == pytest.approx(100.0, abs=2.0)
+    assert frame.loc["2014", "011"].mean() == pytest.approx(100.0, abs=2.0)  # pyright: ignore[reportAttributeAccessIssue] -- pandas-stubs가 .loc 결과를 Series 외 스칼라 합집합으로 추론
