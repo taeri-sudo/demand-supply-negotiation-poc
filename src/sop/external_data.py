@@ -123,6 +123,9 @@ class InstanceInputs:
     pos_similar: pd.DataFrame  # date, item_id, quantity, promotion — 비슷한 제품
     pos_category: pd.DataFrame  # month, quantity — 같은 고객사·같은 상품군(완전한 달)
     market_index: pd.Series | None = None
+    # 변화율 계산용: 상품군에 대응하는 INA-R 그룹별 월별 지수(물가 보정 완료, 열 = D코드). 없으면
+    # `market_index`를 그룹 하나로 본다.
+    market_group_index: pd.DataFrame | None = None
     refs: dict = field(default_factory=dict)
 
 

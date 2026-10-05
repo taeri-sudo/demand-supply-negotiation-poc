@@ -82,7 +82,7 @@ def test_parse_rejects_duplicate_codes_and_non_numeric_cells():
 
 
 def test_parse_does_not_compute_change_rates():
-    """이 단계는 지수 시리즈까지만 만든다 — 변화율은 변화율 기준이 정해진 뒤(4단계)."""
+    """이 단계는 지수 시리즈까지만 만든다 — 변화율은 `category_trend.py`가 만든다."""
     frame = parse_ina_r_rows(sheet(HEADERS, ["3", "D151", "A", 100, 110, 99, 120]), first_month=START)
     assert frame["D151"].tolist() == [100.0, 110.0, 99.0, 120.0]
 

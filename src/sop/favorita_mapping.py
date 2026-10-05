@@ -7,8 +7,8 @@ AGENT_NODE_LIST.md "외부 경계" 데이터 대체 가정의 매핑 표를 코�
   그 D코드의 월별 시리즈를 그대로 쓴다(가중·평균 없음).
 - `food_processing_whole`: 상품군 안에 여러 그룹이 섞여 있어 D코드 하나로 특정할
   수 없음 — D151, D152, D153, D154를 합친 "식품 가공 전체 흐름"을 쓴다. 이 흐름의
-  계산 방식(변화율 기준과 평균)은 M2 4단계 전에 정해지므로 여기서는 대응하는 D코드
-  목록만 둔다.
+  변화율은 그룹별로 만든 뒤 단순 평균한다(`category_trend.py`). 여기서는 대응하는
+  D코드 목록만 둔다.
 - `excluded`: 우리 회사 제품 범위(식품 가공, 음료(비주류), 음료(주류)) 밖.
 
 한계(라벨 기준 근사 매핑, 단순 평균은 네 코드 각 25%라는 중립 가정, PET SUPPLIES
@@ -23,7 +23,7 @@ Industry = Literal["food_processing", "beverage_non_alcoholic", "beverage_alcoho
 MarketMapping = Literal["single_group", "food_processing_whole", "excluded"]
 
 # "식품 가공 전체 흐름"을 이루는 INA-R 그룹. 비중을 알 수 없어 각 코드를 동등하게
-# 취급한다(평균 방식은 4단계에서 정함).
+# 취급한다(변화율을 그룹별로 만든 뒤 단순 평균).
 FOOD_PROCESSING_WHOLE_GROUPS: tuple[str, ...] = ("D151", "D152", "D153", "D154")
 
 

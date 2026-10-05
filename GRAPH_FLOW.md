@@ -11,8 +11,8 @@ supply_coordination 태스크는 그때그때 도착한 만큼만 보고 판단 
 
 ```
 forecast agent((회사,item) 인스턴스별 1개, 총 N개, role_tag: forecast) — 지속 태스크
-   (시나리오 정의→데이터 수집·소스 판단→예측기법 선택→시나리오별 예측 계산→
-    발생 가능성 평가→시나리오 선택을 한 agent 내부 단계로 수행)
+   (가정 정의→데이터 수집·소스 판단→통계기법 선택→가정별 요청량 예측값 계산→
+    가정 선택을 한 agent 내부 단계로 수행)
         ↕  (신호 기반, 평소 정방향 최적화 / 예외 시에만 역방향 핸드오프)
 supply_coordination agent(1개, role_tag: supply_coordination) — 지속 태스크
    ↕procurement_plan   ↕production_plan   ↕logistics_plan  (각 1개, 지속 태스크)
@@ -122,7 +122,7 @@ escalation 발생 시 반응(알림은 받기만 함), 지속 태스크 아님.
        판단 업무에 부담이 됨 — 그래서 검증agent가 대신 알려준다. (`procurement_plan` 등
        워커풀 성격 agent에는 이 이유가 해당 안 됨 — 안건 단위 확인이
        애초에 이들의 본래 일이라 확인 자체가 부담이 아니다.) 예:
-       `forecast`가 선택한 시나리오가 `passed`면 `supply_coordination`
+       `forecast`의 가정들(기법별 값을 거쳐 `scenario`를 정한 결과)이 `passed`면 `supply_coordination`
        에게 push, `procurement_plan`의 응답이 `passed`면
        `supply_coordination`에게 push.
      - 각 agent가 어느 쪽인지는 AGENT_NODE_LIST.md의 agent별 설명(몇 개
@@ -180,7 +180,7 @@ escalation 발생 시 반응(알림은 받기만 함), 지속 태스크 아님.
   내부 재실행 메커니즘을 그대로 재사용한다. `suspected_cause`에 따른 재개
   지점과 대응은 AGENT_NODE_LIST.md forecast agent "되돌림" 참고.
 - **최적화** (forecast→supply_coordination 정방향, 평소 경로): forecast가
-  선택한 시나리오(`selected_scenario`)의 예측값을 supply_coordination이 우선순위 점수 산출 후
+  가정 선택이 정한 최종 요청량(`scenario`)을 supply_coordination이 우선순위 점수 산출 후
   `allocation_candidate`로 생성하는 **단방향 전달** — 라운드가 쌓이지
   않는다. 상대의 응답을 받아 값을 조정하는 절차가 아니라 한 번의 계산으로
   끝나므로 "협상"이 아니다. 다만 이건 **협상 응답(값 조정)이 없다는
@@ -220,15 +220,16 @@ supply_coordination은 procurement_plan·production_plan·logistics_plan agent
 
 | edge | 유형 | 반복 여부 | 종료조건 | escalation 대상 |
 |---|---|---|---|---|
-| forecast → supply_coordination (정방향, 평소) | 단방향 전달(최적화) | 아니오 | forecast가 선택한 시나리오(`selected_scenario`)의 예측값을 우선순위 점수 산출 후 allocation_candidate로 생성 | 없음 |
-| supply_coordination → forecast (역방향, 예외) | 핸드오프형 — 공급망계획agent(procurement_plan 등)가 infeasible을 보냈을 때만 열림 | 아니오 | 재실행 완료(재개 지점부터) | 없음(forecast 자신의 시나리오 선택 판단3계층 — ③ 사람 escalation 포함 — 에 위임) |
+| forecast → supply_coordination (정방향, 평소) | 단방향 전달(최적화) | 아니오 | forecast가 정한 최종 요청량(`scenario`)을 우선순위 점수 산출 후 allocation_candidate로 생성 | 없음 |
+| supply_coordination → forecast (역방향, 예외) | 핸드오프형 — 공급망계획agent(procurement_plan 등)가 infeasible을 보냈을 때만 열림 | 아니오 | 재실행 완료(재개 지점부터) | 없음(forecast 자신의 가정 선택 판단3계층 — ③ 사람 escalation 포함 — 에 위임) |
 | supply_coordination ↔ procurement_plan | 라운드 누적형 | 예 | `response_status: feasible` | max_rounds 소진 → 사람, 또는 공급망조율 판단으로 forecast/채널까지 재확장 |
 | supply_coordination ↔ production_plan | 라운드 누적형 | 예 | 위와 동일 | 위와 동일 |
 | supply_coordination ↔ logistics_plan | 라운드 누적형 | 예 | 위와 동일 | 위와 동일 |
 | supply_coordination → sales_channel | 단방향(출력) | 아니오 | 즉시(배분 결정 반영) | 없음 |
-| sales_channel → forecast | 단방향(입력) | 아니오 | 즉시(주문 이력·POS·프로모션 일정·계약 조건 유입, 주기 스냅샷 기준) | 없음 |
+| sales_channel → forecast | 단방향(입력) | 아니오 | 즉시(주문 이력·POS·프로모션 일정 유입, 주기 스냅샷 기준) | 없음 |
 | human_input → supply_coordination | 단방향(입력) — forecast를 거치지 않는 수량 | 아니오 | 즉시(배분 대상에 포함) | 없음 |
-| forecast → human_manager | 단방향(알림) — 진행을 멈추지 않음 | 아니오 | 즉시(알림 전달) | 없음 |
+| sales_channel → supply_coordination | 단방향(입력) — 최소 구매 약정·공급 보장 물량·MOQ | 아니오 | 즉시(주기 스냅샷 기준, 처리 규칙은 M4·M5) | 없음 |
+| supply_coordination → human_manager | 단방향(알림) — 최소 구매 약정과 배분의 차이, 진행을 멈추지 않음 | 아니오 | 즉시(알림 전달, 구현은 M4·M5) | 없음 |
 | 작성 agent → validation agent(들) | 판정(라우팅 권한 없음) | 아니오 | `passed`/`flagged`/`check_failed` 판정 | check_failed 반복 시 사람(시스템 장애 사유) |
 | escalation_trigger → human_manager | 단방향 | 아니오 | 사람의 resolution 입력 | (최종 단계) |
 

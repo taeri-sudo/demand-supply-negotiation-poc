@@ -22,16 +22,16 @@ AccessMode = Literal["r", "w"]
 DataKind = Literal["orders", "pos", "market"]
 ItemScope = Literal["same_item", "similar_item", "category"]
 # 수요 동인 — 데이터가 실제로 존재하는 요인만 값으로 둔다(자유 텍스트 금지)
-ScenarioDriver = Literal["category_trend", "price", "event"]
-ScenarioDefinedBy = Literal["rule", "agent_judgment"]
+DriverName = Literal["category_trend", "price", "event"]
+AssumptionDefinedBy = Literal["rule", "agent_judgment"]
 
 # 되돌림 사유 — type은 문제가 난 대상, issue는 그 대상의 하위 사유
-CauseType = Literal["scenario", "data_source", "forecast_method"]
-ScenarioIssue = Literal["no_evidence", "effect_out_of_range", "not_distinct", "double_counted"]
+CauseType = Literal["assumption", "data_source", "method_selection"]
+AssumptionIssue = Literal["no_evidence", "value_out_of_range", "not_distinct", "double_counted"]
 DataSourceIssue = Literal["insufficient", "contaminated", "irrelevant"]
-CauseIssue = ScenarioIssue | DataSourceIssue
+CauseIssue = AssumptionIssue | DataSourceIssue
 
-_SCENARIO_ISSUES = frozenset(get_args(ScenarioIssue))
+_ASSUMPTION_ISSUES = frozenset(get_args(AssumptionIssue))
 _DATA_SOURCE_ISSUES = frozenset(get_args(DataSourceIssue))
 
 
@@ -49,22 +49,22 @@ class SuspectedCause(BaseModel):
 
     type: CauseType
     issue: CauseIssue | None = None
-    scenario_id: str | None = None  # type이 scenario일 때 문제가 난 시나리오
+    assumption_id: str | None = None  # type이 assumption일 때 문제가 난 가정
     source: SourceRef | None = None  # type이 data_source일 때 문제가 난 소스
     use_from: date | None = None  # 시점 기준으로 무관할 때
 
     @model_validator(mode="after")
     def _check_type_issue_consistency(self) -> "SuspectedCause":
-        if self.type == "scenario":
-            if self.issue not in _SCENARIO_ISSUES:
-                raise ValueError(f"type=scenario의 issue는 {sorted(_SCENARIO_ISSUES)} 중 하나여야 함")
+        if self.type == "assumption":
+            if self.issue not in _ASSUMPTION_ISSUES:
+                raise ValueError(f"type=assumption의 issue는 {sorted(_ASSUMPTION_ISSUES)} 중 하나여야 함")
         elif self.type == "data_source":
             if self.issue not in _DATA_SOURCE_ISSUES:
                 raise ValueError(
                     f"type=data_source의 issue는 {sorted(_DATA_SOURCE_ISSUES)} 중 하나여야 함"
                 )
         elif self.issue is not None:
-            raise ValueError("type=forecast_method는 issue가 없어야 함")
+            raise ValueError("type=method_selection은 issue가 없어야 함")
         return self
 
 
@@ -86,34 +86,54 @@ class ValidationResult(BaseModel):
 
 
 class Evidence(BaseModel):
-    """가정의 근거 데이터. data_sources와 같은 어휘(kind, item_scope)를 쓴다."""
+    """driver의 근거 데이터. data_sources와 같은 어휘(kind, item_scope)를 쓴다."""
 
     kind: DataKind
     item_scope: ItemScope
     refs: list[str] = Field(default_factory=list)
 
 
-class Assumption(BaseModel):
-    driver: ScenarioDriver
-    demand_effect: float  # 수요 변화율(부호 있음, +0.1 = 10% 증가)
+class Driver(BaseModel):
+    """요청량을 바꾸는 원인(수요 동인) 하나와 그 근거. 가정의 `drivers[]` 항목이다."""
+
+    driver: DriverName
     evidence: Evidence
 
 
-class Scenario(BaseModel):
-    """서로 다른 가정에서 나온 서로 다른 예측. 가정이 여러 개면 동시에 일어나는
-    하나의 미래이며, 효과를 합쳐 예측값 하나·비용 하나를 갖는다.
+class MethodValue(BaseModel):
+    """통계기법 하나가 계산한 요청량(기법별 값)과 과거 정확도로 구한 기법 가중치."""
 
-    value/forecast_uncertainty/likelihood/cost_estimate는 시나리오 정의(1단계)
-    직후에는 아직 계산 전이라 없을 수 있다(계산은 후속 내부 단계가 채운다).
+    method: str
+    value: float
+    method_weight: float
+
+
+class Assumption(BaseModel):
+    """선택지 1개. driver 몇 개와 통계기법 여러 개를 엮어 계산한 하나의 경우의 수다.
+
+    `drivers`가 비어 있으면 기본 가정이며, 기법별 값은 우리 주문 이력만으로 계산한 값이다.
+    `value`는 기법별 값을 합치거나 하나 선택해서 정한 가정의 값이다. 가정 정의 직후에는
+    기법별 값과 value가 아직 없다(계산은 후속 내부 단계가 채운다).
     """
 
-    scenario_id: str
-    assumptions: list[Assumption] = Field(default_factory=list)  # 비어 있으면 기준 시나리오
-    defined_by: ScenarioDefinedBy = "rule"
+    assumption_id: str
+    drivers: list[Driver] = Field(default_factory=list)
+    defined_by: AssumptionDefinedBy = "rule"
+    method_values: list[MethodValue] = Field(default_factory=list)
     value: float | None = None
+    occurrence_likelihood: float | None = None  # 가정 발생 가능성 — 근거가 있을 때만
     forecast_uncertainty: float | None = None
-    likelihood: float | None = None
-    cost_estimate: float | None = None
+
+
+ScenarioDerivation = Literal["pass_through", "chosen", "mean", "median"]
+
+
+class Scenario(BaseModel):
+    """가정들의 value 중에서 택하거나 계산해서 정한 최종 요청량과, 어느 가정에서 왔는지."""
+
+    value: float
+    assumption_ids: list[str]
+    derivation: ScenarioDerivation
 
 
 class DataSource(BaseModel):
@@ -139,6 +159,28 @@ class Cleaning(BaseModel):
     count: int = 0
 
 
+class ExcludedDriver(BaseModel):
+    """근거가 부족하거나 효과가 유의하지 않아 뺀 요인의 기록과, 영향받은 가정.
+
+    영향받은 가정은 그 요인을 단 가정(제외됨) 또는 모든 가정(전제인 요인이 빠짐)이다. `reason`은
+    `no_significant_effect`(통계 추정에서 신뢰구간이 0을 포함), `no_evidence`(근거 데이터
+    없음·부족), `no_applicable_method`(전제를 설명변수로 받는 기법이 계산되지 않아 반영하지 못함)로 구분한다.
+    """
+
+    driver: DriverName
+    assumption_ids: list[str]
+    reason: Literal["no_significant_effect", "no_evidence", "no_applicable_method"]
+    rationale: str
+
+
+class ExcludedAssumption(BaseModel):
+    """맞는 통계기법이 하나도 없어 제외한 가정과 이유."""
+
+    assumption_id: str
+    reason: Literal["no_applicable_method"]
+    rationale: str
+
+
 class ForecastRecord(BaseModel):
     """forecast agent 인스턴스((회사, item) 조합별 1개)가 남기는 현재값 기록.
 
@@ -152,12 +194,14 @@ class ForecastRecord(BaseModel):
     item_id: str
     pool_key: str | None = None
     role_tag: Literal["forecast"] = "forecast"
-    scenarios: list[Scenario] = Field(default_factory=list)
+    assumptions: list[Assumption] = Field(default_factory=list)
+    premises: list[Driver] = Field(default_factory=list)  # 모든 가정의 전제(확정된 프로모션 일정)
+    excluded_drivers: list[ExcludedDriver] = Field(default_factory=list)
+    excluded_assumptions: list[ExcludedAssumption] = Field(default_factory=list)
     data_sources: list[DataSource] = Field(default_factory=list)
     excluded_sources: list[ExcludedSource] = Field(default_factory=list)
     cleaning: Cleaning = Field(default_factory=Cleaning)
-    forecast_method: str | None = None
-    selected_scenario: str | None = None  # 선택된 scenario_id
+    scenario: Scenario | None = None
     selection_basis: SelectionBasis | None = None
     validation: ValidationResult | None = None
 
@@ -219,7 +263,7 @@ class NegotiationLogEntry(BaseModel):
 
 
 class NoticeThreshold(BaseModel):
-    """forecast->human_manager 알림 기준 — 예측과 약정 잔여량의 차이 비율.
+    """supply_coordination->human_manager 알림 기준 — 약정 잔여량과의 차이 비율(처리 규칙은 M4·M5에서 정함).
 
     구속력이 없으면 우리가 손실을 떠안으므로 더 작은 차이에도 알린다.
     """

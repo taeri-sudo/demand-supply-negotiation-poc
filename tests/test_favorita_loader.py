@@ -141,7 +141,7 @@ def test_monthly_counts_split_promo_nonpromo_and_unrecorded_days():
 
 
 def test_negative_sales_are_kept_raw_without_cleaning():
-    """정제는 데이터 소스 판단(3단계)의 몫 — 로더는 반품(음수)을 그대로 둔다."""
+    """정제는 데이터 수집과 소스 판단 단계의 몫 — 로더는 반품(음수)을 그대로 둔다."""
     frame = daily([("2016-01-01", -3.0, False), ("2016-01-31", 5.0, False)]).assign(company_id="C")
     assert aggregate_monthly(frame, ["company_id"])["quantity"].tolist() == [2.0]
 

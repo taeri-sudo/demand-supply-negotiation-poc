@@ -65,7 +65,7 @@ async def test_concurrent_decrement_without_lock_loses_updates():
 
 
 async def test_concurrent_decrement_with_lock_is_correct():
-    """같은 시나리오를 Lock으로 감싸면 두 감소가 모두 반영된다."""
+    """같은 경쟁 상황을 Lock으로 감싸면 두 감소가 모두 반영된다."""
     store = make_store(remaining=100)
 
     await asyncio.gather(

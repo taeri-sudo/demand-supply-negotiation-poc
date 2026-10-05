@@ -10,8 +10,8 @@ agent 간 연결·신호·동시성은 GRAPH_FLOW.md 참고.
 
 ```
 forecast agent((회사,item) 인스턴스별 1개, 총 N개, role_tag: forecast) — 지속 태스크
-   (시나리오 정의→데이터 수집·소스 판단→예측기법 선택→시나리오별 예측 계산→
-    발생 가능성 평가→시나리오 선택을 한 agent 내부 단계로 수행)
+   (가정 정의→데이터 수집·소스 판단→통계기법 선택→가정별 요청량 예측값 계산→
+    가정 선택을 한 agent 내부 단계로 수행)
         ↕  (신호 기반, 평소 정방향 최적화 / 예외 시에만 역방향 핸드오프)
 supply_coordination agent(1개, role_tag: supply_coordination) — 지속 태스크
    ↕procurement_plan   ↕production_plan   ↕logistics_plan  (각 1개, 지속 태스크)
@@ -41,19 +41,26 @@ forecast agent 인스턴스((회사, item) 조합별 1개)가 State에 남기는
 기록. 다른 agent가 이 값을 읽는다(`role_permissions`로 통제).
 ```
 { agent_id, company_id, item_id, pool_key, role_tag: "forecast",
-  scenarios: [
-    { scenario_id,
-      assumptions: [                                        # 비어 있으면 기준 시나리오(현재 추세 유지)
-        { driver: "category_trend" | "price" | "event",     # 수요 동인: 무엇이 변한다고 가정하는가
-          demand_effect,                                    # 그로 인한 수요 변화율(부호 있음, +0.1 = 10% 증가)
-          evidence: { kind, item_scope, refs } }            # 가정의 근거 데이터
+  assumptions: [                                            # 가정 목록
+    { assumption_id,
+      drivers: [                                            # 가정마다 다름. 비어 있으면 기본 가정(현재 추세 유지)
+        { driver: "category_trend" | "price" | "event",     # 요청량을 바꾸는 원인(수요 동인)
+          evidence: { kind, item_scope, refs } }            # 이 요인의 근거 — data_sources 풀에서 쓰는 데이터
       ],
       defined_by: "rule" | "agent_judgment",
-      value,                                                # 이 시나리오의 예측값
-      forecast_uncertainty,                                 # 이 시나리오 예측의 흔들림
-      likelihood,                                           # 이 시나리오가 실제로 일어날 가능성
-      cost_estimate }                                       # 이 시나리오대로 준비했는데 다른 시나리오가
-                                                            # 실현됐을 때의 손실, 각 likelihood로 가중
+      method_values: [                                      # 이 가정이 고른 통계기법별 요청량
+        { method, value, method_weight } ],                 # method_weight: 이 가정에서 잰 과거 정확도로 구한 기법 가중치
+      value,                                                # 기법별 값을 합치거나 하나 선택한 가정의 요청량
+      occurrence_likelihood,                                # 가정 발생 가능성(근거가 있을 때만, 없으면 null)
+      forecast_uncertainty }                                # 기법별 과거 오차(MAE)를 기법 가중치로 가중한 값
+  ],
+  premises: [ { driver: "event", evidence } ],              # 모든 가정의 전제(확정된 프로모션 일정). 가정의 요소가 아님
+  excluded_drivers: [
+    { driver, assumption_ids, reason, rationale }           # 근거 부족·효과 없음·반영 불가로 뺀 요인과 영향받은 가정
+  ],                                                        # reason: "no_significant_effect" | "no_evidence" | "no_applicable_method"
+  excluded_assumptions: [
+    { assumption_id, reason: "no_applicable_method",        # 맞는 통계기법이 하나도 없어 제외한 가정
+      rationale }
   ],
   data_sources: [
     { kind: "orders" | "pos" | "market",                   # 데이터 출처
@@ -65,17 +72,17 @@ forecast agent 인스턴스((회사, item) 조합별 1개)가 State에 남기는
     { kind, item_scope, refs, reason: "irrelevant" }        # 관련 없는 데이터 — 재실행 시 다시 고르지 않음
   ],
   cleaning: { applied, count },                             # 표준 정제 적용 기록
-  forecast_method,                                          # 통계 예측기법
-  selected_scenario,
+  scenario: { value, assumption_ids, derivation },          # 가정들 중에서 택하거나 계산해 정한 최종 요청량과 출처 가정
+                                                            # derivation: "pass_through" | "chosen" | "mean" | "median"
   selection_basis: "rule" | "agent_judgment" | "human",
   validation: { status: "passed" | "flagged" | "check_failed",
                 suspected_cause, rationale, ts, validator_role_tag }
 }
 
 suspected_cause: {
-  type:   "scenario" | "data_source" | "forecast_method",
+  type:   "assumption" | "data_source" | "method_selection",
   issue:  (type별 하위 사유 — 아래 참고) | null,
-  scenario_id: ... | null,                                   # type이 scenario일 때 문제가 난 시나리오
+  assumption_id: ... | null,                                  # type이 assumption일 때 문제가 난 가정
   source: { kind, item_scope } | null,                       # type이 data_source일 때 문제가 난 소스
   use_from: date | null                                      # 시점 기준으로 무관할 때
 }
@@ -95,36 +102,64 @@ suspected_cause: {
 [i].exchanges`의 production_plan 응답으로 정해진 뒤 참조용으로 기록만
 된다(아래 `capacity_pools` 절 참고).
 
-**시나리오 — 2단 구조.** 시나리오는 서로 다른 가정에서 나온 서로 다른
-예측이다. 시나리오가 여러 개 있고, 각 시나리오 안에 가정이 여러 개 있을 수
-있다. 가정이 여러 개인 시나리오는 그 가정들이 **동시에 일어나는 하나의
-미래**이며, 효과를 합쳐 예측값 하나·비용 하나를 갖는다.
-- `driver`(수요 동인)는 데이터가 실제로 존재하는 요인만 값으로 둔다 —
-  `category_trend`(카테고리 추세, 시장 데이터), `price`(매장 판매가 변화),
-  `event`(프로모션·명절 같은 캘린더 이벤트). 자유 텍스트로 두면 근거를
-  검증할 수 없다. 새 요인이 필요해지면 값을 추가한다.
-- `price`는 **확장 영역**이다 — 매장 판매가 데이터가 없고, 고객사 단독 가격
-  조정은 미리 알 수 없어 현재는 사용하지 않는다(근거가 없어 시나리오 검증
-  조건에서 걸리므로 가정이 만들어지지 않음). 협의된 가격 인하는 프로모션이라
-  `event`로 들어간다.
-- `evidence`는 아래 `data_sources`와 같은 어휘(`kind`, `item_scope`)를 써서
-  "근거가 실제로 수집된 데이터에 있는가"를 바로 확인할 수 있게 한다.
-- `defined_by`는 시나리오를 규칙이 만들었는지(`"rule"`) agent 판단이
-  만들었는지(`"agent_judgment"`)를 기록한다.
-- `value`, `forecast_uncertainty`, `likelihood`, `cost_estimate`는 시나리오를 처음
-  정의한 직후에는 비어 있고, 예측 계산과 발생 가능성 평가 단계에서 채워진다.
-  값이 비어 있는 시나리오는 시나리오 선택의 대상이 아니다.
-- `likelihood`는 한 인스턴스의 시나리오들끼리 합이 1이 되도록 맞춘다.
-- `cost_estimate`에 쓰는 단위당 과잉 비용·부족 비용은 공급가·제조원가 등
-  원가 입력에서 계산하는 파생값이다(원가 입력과 계산식은 AGENT_NODE_LIST.md
-  forecast agent "입력" 참고).
+**용어 — 이 문서가 정의하고 다른 문서는 참조한다.**
+- **driver**(수요 동인): 요청량을 바꾸는 원인 하나. 프로모션(`event`), 시장 추세(`category_trend`) 등.
+  근거 데이터가 실제로 있는 것만 목록에 두고 새 요인이 필요해지면 값을 추가한다. 자유 텍스트로 두면
+  근거를 검증할 수 없다. `price`(매장 판매가 변화)는 확장 영역이다 — 매장 판매가 데이터가 없고 고객사 단독
+  가격 조정은 미리 알 수 없어 `price`는 매장 판매가 데이터가 생길 때 쓴다. 협의된 가격 인하는 프로모션이라
+  `event`로 들어간다. 최소 구매 약정은 이미 맺은 계약 수량으로 supply_coordination의 입력이다
+  (AGENT_NODE_LIST.md).
+- **가정**(assumption): 선택지 1개. driver 몇 개와 통계기법 여러 개를 엮어 계산한 하나의 경우의 수다.
+  `drivers[]`가 가정마다 다르고 비어 있으면 기본 가정이다.
+- **시나리오**(scenario): 가정들 중에서 하나를 택하거나 계산해서 정한 **최종 요청량**과 어느 가정에서
+  왔는지(`scenario`). 가정 선택 단계가 만든다.
+- **data_sources**(forecast_record 바로 아래): 수집과 소스 판단을 거친 데이터 풀. 가정 안 `evidence`가
+  그 풀에서 어떤 데이터를 쓰는지 `(kind, item_scope)`로 가리킨다("근거가 실제로 수집된 데이터에
+  있는가"를 바로 확인할 수 있게 같은 어휘를 쓴다).
 
-시나리오 검증 조건(대상 agent의 계산을 재현하지 않는 독립 제약조건):
-- `evidence`가 이번 주기 스냅샷 안에 실제로 존재하는가
-- `demand_effect`가 과거 변동 범위 안에 있는가
-- 시나리오끼리 `value` 차이가 최소 기준 이상인가(사실상 같은 예측 방지)
-- 한 시나리오 안의 두 가정이 같은 근거를 중복 사용하지 않는가(예:
-  가격 인하가 포함된 프로모션을 `price`와 `event`로 이중 계산)
+**가정의 구성.**
+- 기법별 값(`method_values`)은 가정 안에만 둔다. 기본 가정(`drivers`가 빈 가정)도 같은 구조이며 기법별
+  값은 우리 주문 이력만으로 계산한 값이다.
+- 같은 요인 조합이라도 종류나 쓰는 데이터, 통계기법 구성이 다르면 다른 가정이다(요청량이 같아도 합치지
+  않는다). 가정 조합을 모두 나열하지 않고 입력 데이터가 있는 후보를 넓게 올린 뒤 분석 결과를 보고 줄인다.
+  상한은 가정 안의 driver 개수, 가정 선택에 올라가는 가정 개수, 가정마다 돌릴 통계기법 개수 세 가지이며
+  `judgment_thresholds.py`에 둔다.
+- 통계기법은 가정마다 자율적으로 고른다. 규칙은 기법을 확정하지 않는다: (a) 가정을 반영할 수 없거나
+  계산이 불가능한 기법만 제외하고, (b) 데이터 특성(간헐수요 등)은 후보를 추가하는 용도로만 쓰며, (c) 후보를
+  모두 계산해서 가정마다 따로 잰 과거 정확도(walk-forward, 그 가정이 성립했던 기간의 데이터)를 기법
+  가중치(`method_weight`)로 쓴다. driver의 데이터를 반영하는 방식은 기법마다 다르다. 그 가정이 성립했던 기간의 표본이 부족하면 기법 가중치는 균등으로 두고
+  "애매함"으로 표시한다. 맞는 기법이 하나도 없는 가정은 제외하고 `excluded_assumptions`에 이유를 남긴다.
+- `value`는 기법별 값들을 합치거나(가중 평균) 그중 하나를 선택해서 정한다(**가정 안**의 합치기·선택).
+  이와 별개로 **가정 선택**은 가정들의 `value` 중에서 하나를 택하거나, 값이 너무 갈리면 중간값이나 평균
+  등을 계산해서 최종 요청량(시나리오)을 정하고, 가정이 하나뿐이면 그대로 전달한다. 둘 다 숫자 공식 하나로
+  계산하지 않고 판단3계층이다. M2는 규칙이, M7은 LLM이 같은 반환 스키마로 맡는다.
+- 가정 안의 두 값은 이름이 다르다. `method_weight`는 그 가정 안에서 기법의 과거 정확도로 구한 기법
+  가중치이고, `occurrence_likelihood`는 가정이 실제로 일어날 가능성이다(근거가 있을 때만 채우고 M2에서는
+  채우는 규칙이 없어 null이다). 발생 가능성은 가정의 `occurrence_likelihood`로만 둔다. 비용 기반 요청량
+  결정의 위치는 DESIGN.md "아직 결정 안 된 것"을 본다.
+- 확정된 프로모션 일정은 가정의 요소가 아니라 **모든 가정의 전제**(`premises`)다. 전제를 반영할 수 없는
+  기법은 모든 가정에서 제외된다. 과거 프로모션 기록이 부족하면 전제만 모든 가정에서 뺀다. 기본 가정은 전제 유무와 상관없이 항상 후보다 —
+  전제를 설명변수로 받는 기법이 하나도 계산되지 않으면 전제 없이 우리 주문 이력만으로 계산하고, 전제를
+  반영하지 못했다는 사실과 이유를 `excluded_drivers`(`no_applicable_method`)에 남기며 "애매함"으로 표시한다.
+- `defined_by`는 가정을 규칙이 만들었는지(`"rule"`) agent 판단이 만들었는지(`"agent_judgment"`)를 기록한다.
+- 가정 정의 직후에는 `method_values`와 `value`, `forecast_uncertainty`가 비어 있고(가정 정의는 요인과
+  근거를 선언만 한다) 통계기법 선택과 가정별 요청량 예측값 계산이 채운다. 값이 비어 있는 가정은 가정
+  선택의 대상이 아니다.
+- 요인의 효과를 통계로 확인해 유의한 효과가 없다고 나온 요인(`category_trend`의 신뢰구간이 0을 포함하는
+  경우)을 단 가정은 forecast가 제외하고, 근거가 부족한 전제는 모든 가정에서 뺀다. `excluded_drivers`에
+  요인, 영향받은 가정, 이유를 기록하며 이유(`reason`)는 `no_significant_effect`(신뢰구간이 0을 포함),
+  `no_evidence`(forecast가 근거 데이터를 수집하지 못했거나 기록이 모자람), `no_applicable_method`(전제를
+  설명변수로 받는 기법이 계산되지 않음) 중 하나다. 되돌림 사유(`suspected_cause.issue`)의 `no_evidence`는
+  검증agent가 가정의 근거가 이번 주기 스냅샷의 `data_sources`에 없다고 알리는 값이며, 두 `no_evidence`는
+  쓰이는 필드로 구분한다(`excluded_drivers.reason`과 `suspected_cause.issue`).
+
+가정 검증 조건(대상 agent의 계산을 재현하지 않는 독립 제약조건):
+- 요인의 `evidence`가 이번 주기 스냅샷의 `data_sources`에 실제로 존재하는가
+- 가정의 `value`가 과거 월별 요청량의 범위 안에 있는가
+- 같은 구성(요인·근거와 통계기법 집합)의 가정이 둘 이상이 아닌가 — 요청량이 같아도 데이터나 기법이 다르면
+  다른 가정이므로 `value`는 비교하지 않는다
+- 한 가정 안의 두 요인이 같은 근거를 중복 사용하지 않는가(예: 가격 인하가 포함된 프로모션을 `price`와
+  `event`로 이중 계산)
 
 **데이터 소스 — `kind`와 `item_scope`는 성격이 다른 두 변수다.**
 
@@ -149,9 +184,9 @@ suspected_cause: {
 
 | type | issue |
 |---|---|
-| `scenario` | `no_evidence`(근거가 스냅샷에 없음) / `effect_out_of_range`(효과가 과거 변동 범위를 벗어남) / `not_distinct`(시나리오 간 차이 없음) / `double_counted`(가정 간 근거 중복) — 위 시나리오 검증 조건과 1:1 대응 |
+| `assumption` | `no_evidence`(근거가 스냅샷에 없음) / `value_out_of_range`(가정의 value가 과거 월별 요청량 범위를 벗어남) / `not_distinct`(같은 구성의 가정이 둘 이상) / `double_counted`(한 가정 안 요인 간 근거 중복) — 위 가정 검증 조건과 1:1 대응 |
 | `data_source` | `insufficient`(부족) / `contaminated`(오염) / `irrelevant`(무관 — `use_from`이 있으면 시점 기준, 없으면 관련 없는 소스) |
-| `forecast_method` | 없음(직전 예측기법이 문제) |
+| `method_selection` | 없음(가정마다 고른 통계기법 구성이 문제) |
 
 사유별 재개 지점과 대응은 AGENT_NODE_LIST.md forecast agent "되돌림" 참고.
 검증agent의 `flagged`와 supply_coordination→forecast 역방향 되돌림은 같은
@@ -293,15 +328,17 @@ agent 역할 간 상호작용 규칙(동역학). `scope`는 인스턴스 나열�
 선택(Optional)으로 바꿀지는 이 구분을 실제로 구현하는 마일스톤에서
 정한다.
 
-**forecast → human_manager**(최소 구매 약정과 예측의 차이, AGENT_NODE_LIST.md
-forecast agent 참고)는 supply_coordination과 무관한 별도 엣지다. 진행을 멈추지
-않는 `notice` 모드라 라운드가 없고, 알림 기준값만 둔다. 약정의 구속력에 따라
-기준이 다르다(구속력이 없으면 우리가 손실을 떠안으므로 더 작은 차이에도 알림):
+**supply_coordination → human_manager**(최소 구매 약정과 배분의 차이,
+AGENT_NODE_LIST.md supply_coordination agent 참고)는 plan agent와의 협상과 무관한
+별도 엣지다. 진행을 멈추지 않는 `notice` 모드라 라운드가 없고, 알림 기준값만
+둔다. 약정의 구속력에 따라 기준이 다르다(구속력이 없으면 우리가 손실을 떠안으므로
+더 작은 차이에도 알림). 기록만 해 두고 구현은 M4·M5이며, 처리 규칙과 아래 기준값의
+측정 대상은 그때 정한다:
 ```
-{ edge: "forecast->human_manager", scope: ["forecast", "human_manager"],
+{ edge: "supply_coordination->human_manager", scope: ["supply_coordination", "human_manager"],
   escalation_trigger: "commitment_gap", escalation_target: "human_manager",
   escalation_kind: "rule", escalation_mode: "notice",
-  notice_threshold: { binding: 0.2, non_binding: 0.05 },  # 예측과 약정 잔여량의 차이 비율
+  notice_threshold: { binding: 0.2, non_binding: 0.05 },  # 약정 잔여량과의 차이 비율
   source: "initial_design", last_updated }
 ```
 

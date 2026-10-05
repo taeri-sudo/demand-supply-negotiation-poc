@@ -1,6 +1,6 @@
-"""forecast agent 내부 2단계 — 데이터 수집과 데이터 소스 판단 (규칙 기반).
+"""forecast agent의 "데이터 수집과 소스 판단" 단계 (규칙 기반).
 
-AGENT_NODE_LIST.md forecast agent 2단계를 구현한다. 한 인스턴스((회사, item))의 입력
+AGENT_NODE_LIST.md의 이 단계를 구현한다. 한 인스턴스((회사, item))의 입력
 (`InstanceInputs`)에서 기본 데이터(`orders` + `same_item`)를 항상 쓰고, 각 소스의 상태를
 확인해 다음을 기록한다.
 
@@ -17,15 +17,18 @@ AGENT_NODE_LIST.md forecast agent 2단계를 구현한다. 한 인스턴스((회
   escalation이 필요하다고 표시한다.
 - 자기 데이터가 쌓여 `MIN_HISTORY_MONTHS`개월 이상이면 보강은 자연히 빠진다.
 
-시나리오가 요구하는 근거 데이터를 입력으로 받는 부분은 시나리오 정의(M2 4단계)와 함께
-정해진다. 시장 변화율이 필요한 판단(기록 없는 상승 구간을 같은 시기 시장 흐름과 비교)은
-변화율 기준이 정해질 때까지 만들지 않았다.
+**필수 근거**: "가정 정의"가 선언한 근거 데이터를 `required_evidence`
+(`(kind, item_scope)` 쌍 목록, 기본은 빈 목록)로 받아 근거마다 수집한다. 수집할 수 없으면 오류를
+내지 않고 "수집 불가"(`evidence_status`)로 돌려주며, "가정별 요청량 예측값 계산"이 그 근거에 기대는
+요인이 있는 가정을 제외한다. 수집한 근거는 `data_sources`에 기록돼 가정의 `evidence`가 스냅샷 안에 있는지
+확인할 수 있다. 기록 없는 상승 구간을 같은 시기 시장 흐름과 비교하는 판단은 이번 범위가 아니다.
 
 수치 기준은 모두 `judgment_thresholds.py`에 있다.
 """
 
 from dataclasses import dataclass, field
 from datetime import date
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -54,6 +57,7 @@ from .state import Cleaning, DataKind, DataSource, ExcludedSource, ForecastRecor
 
 ROLE_TAG = "forecast"
 SourceKey = tuple[DataKind, ItemScope]  # (kind, item_scope) — 후보 소스를 가리키는 키
+EvidenceStatus = Literal["collected", "unavailable"]  # 필수 근거의 수집 상태("수집 불가" = unavailable)
 MIN_FIT_ERROR = 0.05  # 보강 가중에서 오차가 이보다 작아도 이 값으로 본다(0으로 나누기 방지)
 
 
@@ -67,6 +71,9 @@ class DataCollectionResult:
     judgments: list[StructuredJudgment] = field(default_factory=list)
     needs_human: bool = False
     human_reason: str | None = None
+    # 필수 근거별 수집 상태와, 수집된 근거의 월별 시리즈(market은 그룹별 지수 DataFrame)
+    evidence_status: dict[SourceKey, EvidenceStatus] = field(default_factory=dict)
+    evidence_series: dict[SourceKey, pd.Series | pd.DataFrame] = field(default_factory=dict)
 
     @property
     def n_observed_months(self) -> int:
@@ -249,8 +256,60 @@ def _backcast(
     return backcast, used, excluded
 
 
-def collect_instance_data(inputs: InstanceInputs) -> DataCollectionResult:
-    """데이터 수집과 소스 판단. 상태(State)는 건드리지 않고 결과를 반환한다."""
+def _collect_required_evidence(
+    inputs: InstanceInputs,
+    required: list[SourceKey],
+    last_month: pd.Timestamp,
+    promo_use_from: pd.Timestamp | None,
+    base: pd.Series,
+    data_sources: list[DataSource],
+    judgments: list[StructuredJudgment],
+) -> tuple[dict[SourceKey, EvidenceStatus], dict[SourceKey, pd.Series | pd.DataFrame]]:
+    """필수 근거를 수집한다. 수집한 근거는 `data_sources`에 없으면 추가한다. 반환: 상태, 시리즈.
+
+    근거로 쓰는 POS도 일별로 정제한 월별 값이다(정제 점 수는 `cleaning`에 이미 센 것과 겹쳐 다시 세지 않는다).
+    """
+    status: dict[SourceKey, EvidenceStatus] = {}
+    series: dict[SourceKey, pd.Series | pd.DataFrame] = {}
+    if not required:
+        return status, series
+    candidates, _ = _supplement_candidates(inputs, last_month, promo_use_from)
+    for key in dict.fromkeys(required):
+        label = f"{key[0]}/{key[1]}"
+        if key == ("orders", "same_item"):
+            status[key], series[key] = "collected", base
+            continue
+        if key == ("market", "category"):
+            frame = inputs.market_group_index
+            if frame is None and inputs.market_index is not None:
+                frame = inputs.market_index.to_frame()
+            if frame is None or frame.empty:
+                status[key] = "unavailable"
+                judgments.append(_judgment("evidence_unavailable", f"{label}: 시장 데이터가 없어 수집 불가", source=label))
+                continue
+            status[key], series[key] = "collected", frame[frame.index <= last_month]
+            refs = list(frame.columns)
+        elif key in candidates:
+            refs, found = candidates[key]
+            status[key], series[key] = "collected", found
+        else:
+            status[key] = "unavailable"
+            judgments.append(_judgment("evidence_unavailable", f"{label}: 이 데이터를 수집할 수 없음(없거나 제공되지 않는 조합)", source=label))
+            continue
+        if not any((s.kind, s.item_scope) == key for s in data_sources):
+            data_sources.append(DataSource(kind=key[0], item_scope=key[1], refs=[str(r) for r in refs]))
+        judgments.append(_judgment("evidence_collected", f"{label}: 가정의 필수 근거로 수집", source=label))
+    return status, series
+
+
+def collect_instance_data(
+    inputs: InstanceInputs, required_evidence: list[SourceKey] | None = None
+) -> DataCollectionResult:
+    """데이터 수집과 소스 판단. 상태(State)는 건드리지 않고 결과를 반환한다.
+
+    `required_evidence`는 가정 정의가 선언한 근거 목록이다. 근거마다 수집하고, 수집할 수
+    없으면 오류 대신 `evidence_status`에 "unavailable"로 돌려준다.
+    """
     judgments: list[StructuredJudgment] = []
     last_month = last_complete_month(inputs.data_end)
     cleaned_points = 0
@@ -353,6 +412,10 @@ def collect_instance_data(inputs: InstanceInputs) -> DataCollectionResult:
                 _judgment("history_supplemented", f"이력 {len(base)}개월로 부족(기준 {MIN_HISTORY_MONTHS}개월)해 {len(used)}개 소스로 앞쪽 {len(backcast)}개월을 보강", observed_months=len(base), backcast_months=len(backcast), sources=[f"{k[0]}/{k[1]}" for k in used])
             )
 
+    evidence_status, evidence_series = _collect_required_evidence(
+        inputs, required_evidence or [], last_month, promo_use_from, base, data_sources, judgments
+    )
+
     log(ROLE_TAG, "collect_instance_data", company_id=inputs.company_id, item_id=inputs.item_id,
         observed_months=len(base), training_months=len(training), cleaned=cleaned_points,
         sources=len(data_sources), excluded=len(excluded_sources), needs_human=needs_human)
@@ -365,6 +428,8 @@ def collect_instance_data(inputs: InstanceInputs) -> DataCollectionResult:
         judgments=judgments,
         needs_human=needs_human,
         human_reason=human_reason,
+        evidence_status=evidence_status,
+        evidence_series=evidence_series,
     )
 
 
