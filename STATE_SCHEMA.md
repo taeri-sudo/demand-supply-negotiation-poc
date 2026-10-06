@@ -1,8 +1,7 @@
 # State 스키마
 
 State의 7개 최상위 필드 정의와 필드 수준의 규칙. 구현 중 실제로 이 스키마
-자체가 바뀌면(필드 추가/제거/형태 변경) 이 파일을 직접 고친다 — 바뀐 이유는
-JOURNAL.md에 남긴다. 설명은 한글, 실제 필드명/태그값(스키마 코드블록
+자체가 바뀌면(필드 추가/제거/형태 변경) 이 파일을 직접 고친다. 설명은 한글, 실제 필드명/태그값(스키마 코드블록
 안)은 영어(snake_case). agent의 역할·내부 단계는 AGENT_NODE_LIST.md,
 agent 간 연결·신호·동시성은 GRAPH_FLOW.md 참고.
 
@@ -72,9 +71,10 @@ forecast agent 인스턴스((회사, item) 조합별 1개)가 State에 남기는
     { kind, item_scope, refs, reason: "irrelevant" }        # 관련 없는 데이터 — 재실행 시 다시 고르지 않음
   ],
   cleaning: { applied, count },                             # 표준 정제 적용 기록
-  scenario: { value, assumption_ids, derivation },          # 가정들 중에서 택하거나 계산해 정한 최종 요청량과 출처 가정
+  scenario: { value, assumption_ids, derivation } | null,   # 가정들 중에서 택하거나 계산해 정한 최종 요청량과 출처 가정
                                                             # derivation: "pass_through" | "chosen" | "mean" | "median"
-  selection_basis: "rule" | "agent_judgment" | "human",
+                                                            # 요청량을 만들 수 없으면 null(아래 "요청량을 만들 수 없을 때")
+  selection_basis: "rule" | "agent_judgment" | "human" | null,
   validation: { status: "passed" | "flagged" | "check_failed",
                 suspected_cause, rationale, ts, validator_role_tag }
 }
@@ -117,49 +117,32 @@ suspected_cause: {
   그 풀에서 어떤 데이터를 쓰는지 `(kind, item_scope)`로 가리킨다("근거가 실제로 수집된 데이터에
   있는가"를 바로 확인할 수 있게 같은 어휘를 쓴다).
 
-**가정의 구성.**
+**가정의 구성.** (필드 수준의 규칙만 둔다. 가정을 어떻게 정하고 계산하는지는 AGENT_NODE_LIST.md forecast
+내부 단계에 있다.)
 - 기법별 값(`method_values`)은 가정 안에만 둔다. 기본 가정(`drivers`가 빈 가정)도 같은 구조이며 기법별
   값은 우리 주문 이력만으로 계산한 값이다.
-- 같은 요인 조합이라도 종류나 쓰는 데이터, 통계기법 구성이 다르면 다른 가정이다(요청량이 같아도 합치지
-  않는다). 가정 조합을 모두 나열하지 않고 입력 데이터가 있는 후보를 넓게 올린 뒤 분석 결과를 보고 줄인다.
-  상한은 가정 안의 driver 개수, 가정 선택에 올라가는 가정 개수, 가정마다 돌릴 통계기법 개수 세 가지이며
-  `judgment_thresholds.py`에 둔다.
-- 통계기법은 가정마다 자율적으로 고른다. 규칙은 기법을 확정하지 않는다: (a) 가정을 반영할 수 없거나
-  계산이 불가능한 기법만 제외하고, (b) 데이터 특성(간헐수요 등)은 후보를 추가하는 용도로만 쓰며, (c) 후보를
-  모두 계산해서 가정마다 따로 잰 과거 정확도(walk-forward, 그 가정이 성립했던 기간의 데이터)를 기법
-  가중치(`method_weight`)로 쓴다. driver의 데이터를 반영하는 방식은 기법마다 다르다. 그 가정이 성립했던 기간의 표본이 부족하면 기법 가중치는 균등으로 두고
-  "애매함"으로 표시한다. 맞는 기법이 하나도 없는 가정은 제외하고 `excluded_assumptions`에 이유를 남긴다.
-- `value`는 기법별 값들을 합치거나(가중 평균) 그중 하나를 선택해서 정한다(**가정 안**의 합치기·선택).
-  이와 별개로 **가정 선택**은 가정들의 `value` 중에서 하나를 택하거나, 값이 너무 갈리면 중간값이나 평균
-  등을 계산해서 최종 요청량(시나리오)을 정하고, 가정이 하나뿐이면 그대로 전달한다. 둘 다 숫자 공식 하나로
-  계산하지 않고 판단3계층이다. M2는 규칙이, M7은 LLM이 같은 반환 스키마로 맡는다.
 - 가정 안의 두 값은 이름이 다르다. `method_weight`는 그 가정 안에서 기법의 과거 정확도로 구한 기법
   가중치이고, `occurrence_likelihood`는 가정이 실제로 일어날 가능성이다(근거가 있을 때만 채우고 M2에서는
-  채우는 규칙이 없어 null이다). 발생 가능성은 가정의 `occurrence_likelihood`로만 둔다. 비용 기반 요청량
-  결정의 위치는 DESIGN.md "아직 결정 안 된 것"을 본다.
-- 확정된 프로모션 일정은 가정의 요소가 아니라 **모든 가정의 전제**(`premises`)다. 전제를 반영할 수 없는
-  기법은 모든 가정에서 제외된다. 과거 프로모션 기록이 부족하면 전제만 모든 가정에서 뺀다. 기본 가정은 전제 유무와 상관없이 항상 후보다 —
-  전제를 설명변수로 받는 기법이 하나도 계산되지 않으면 전제 없이 우리 주문 이력만으로 계산하고, 전제를
-  반영하지 못했다는 사실과 이유를 `excluded_drivers`(`no_applicable_method`)에 남기며 "애매함"으로 표시한다.
+  채우는 규칙이 없어 null이다). 발생 가능성은 가정의 `occurrence_likelihood`로만 둔다.
+- `value`는 가정 하나의 요청량 예측값이고, 가정 안에서 기법별 값을 합치거나 하나 선택해 정한다.
 - `defined_by`는 가정을 규칙이 만들었는지(`"rule"`) agent 판단이 만들었는지(`"agent_judgment"`)를 기록한다.
 - 가정 정의 직후에는 `method_values`와 `value`, `forecast_uncertainty`가 비어 있고(가정 정의는 요인과
   근거를 선언만 한다) 통계기법 선택과 가정별 요청량 예측값 계산이 채운다. 값이 비어 있는 가정은 가정
   선택의 대상이 아니다.
-- 요인의 효과를 통계로 확인해 유의한 효과가 없다고 나온 요인(`category_trend`의 신뢰구간이 0을 포함하는
-  경우)을 단 가정은 forecast가 제외하고, 근거가 부족한 전제는 모든 가정에서 뺀다. `excluded_drivers`에
-  요인, 영향받은 가정, 이유를 기록하며 이유(`reason`)는 `no_significant_effect`(신뢰구간이 0을 포함),
-  `no_evidence`(forecast가 근거 데이터를 수집하지 못했거나 기록이 모자람), `no_applicable_method`(전제를
-  설명변수로 받는 기법이 계산되지 않음) 중 하나다. 되돌림 사유(`suspected_cause.issue`)의 `no_evidence`는
-  검증agent가 가정의 근거가 이번 주기 스냅샷의 `data_sources`에 없다고 알리는 값이며, 두 `no_evidence`는
-  쓰이는 필드로 구분한다(`excluded_drivers.reason`과 `suspected_cause.issue`).
-
-가정 검증 조건(대상 agent의 계산을 재현하지 않는 독립 제약조건):
-- 요인의 `evidence`가 이번 주기 스냅샷의 `data_sources`에 실제로 존재하는가
-- 가정의 `value`가 과거 월별 요청량의 범위 안에 있는가
-- 같은 구성(요인·근거와 통계기법 집합)의 가정이 둘 이상이 아닌가 — 요청량이 같아도 데이터나 기법이 다르면
-  다른 가정이므로 `value`는 비교하지 않는다
-- 한 가정 안의 두 요인이 같은 근거를 중복 사용하지 않는가(예: 가격 인하가 포함된 프로모션을 `price`와
-  `event`로 이중 계산)
+- 확정된 프로모션 일정은 가정의 요소가 아니라 **모든 가정의 전제**(`premises`)다.
+- 제외 기록: 가정에서 뺀 요인은 `excluded_drivers`에 요인, 영향받은 가정, 이유(`reason`)를 남기고,
+  계산할 수 없어 제외한 가정은 `excluded_assumptions`에 이유를 남긴다. `excluded_drivers.reason`은
+  `no_significant_effect`(신뢰구간이 0을 포함), `no_evidence`(forecast가 근거 데이터를 수집하지 못했거나
+  기록이 모자람), `no_applicable_method`(전제를 설명변수로 받는 기법이 계산되지 않음) 중 하나다. 되돌림
+  사유(`suspected_cause.issue`)의 `no_evidence`는 검증agent가 가정의 근거가 이번 주기 스냅샷의
+  `data_sources`에 없다고 알리는 값이며, 두 `no_evidence`는 쓰이는 필드로 구분한다
+  (`excluded_drivers.reason`과 `suspected_cause.issue`).
+- **요청량을 만들 수 없을 때**: 계산된 가정이 하나도 없으면(기본 가정까지 계산되지 않았거나, 사용할 수 있는
+  주문 이력이 없음) `scenario`와 `selection_basis`는 `null`이다. 요청량 0은 정상 값(`scenario.value = 0`)이고
+  `null`은 값이 없다는 뜻이라 서로 다르다. 이때 `escalation_records`에 `reason: "no_computable_assumption"`
+  건이 열린다(7번 절). 이후 forecast agent의 동작은 AGENT_NODE_LIST.md "사람 escalation 세 경우"를 따른다.
+- 가정 검증 조건(검증agent가 확인하는 독립 제약조건)은 AGENT_NODE_LIST.md 검증agent 절에 있고, 어긴 경우의
+  사유 값은 아래 `suspected_cause` 표에 있다.
 
 **데이터 소스 — `kind`와 `item_scope`는 성격이 다른 두 변수다.**
 
@@ -292,7 +275,6 @@ priority_queue_entry = { agent_id, wait_start_ts, revenue_impact,
 ```
 
 ### 5. `interaction_protocol[]`
-이 표는 코드가 조회하는 엣지별 기준값(max_rounds, repeat_escalation_threshold, 알림 기준, 처리 모드 등)을 담는다. 트레이싱·상호작용 기록이나 외부 벤치마크로 조정할 값이 있는 엣지만 두고, 값이 고정인 경우는 두지 않는다. 엣지의 흐름은 GRAPH_FLOW.md에 있다.
 agent 역할 간 상호작용 규칙(동역학). `scope`는 인스턴스 나열이 아니라 역할
 태그.
 ```
@@ -343,6 +325,20 @@ AGENT_NODE_LIST.md supply_coordination agent 참고)는 plan agent와의 협상�
   source: "initial_design", last_updated }
 ```
 
+**forecast → human_manager**는 가정 선택 ③에만 항목이 있다. ③은 가정들의 값이 서로 많이 다르고, 과거
+정확도로 매긴 점수에서도 1등 가정이 2등을 뚜렷하게 앞서지 못해 어느 가정을 믿을지 정할 수 없을 때 사람을
+부르는 경우다(판단 기준은 AGENT_NODE_LIST.md forecast 5단계). 사람이 필요한지(모드)를 트레이싱·처리 결과를
+보고 조정할 대상이기 때문에 항목을 둔다. 요청량을 만들 수 없을 때와 되돌림 선택지가 소진됐을 때는 조정할 값이
+없고 항상 `intervention`이라 항목을 두지 않는다. 같은 엣지에 트리거가 여러 개일 수 있어 조회 키는
+`(edge, escalation_trigger)`다. ③의 수치 기준은 지금 코드의 `judgment_thresholds.py`에 있다.
+```
+{ edge: "forecast->human_manager", scope: ["forecast", "human_manager"],
+  escalation_trigger: "selection_unresolved", escalation_target: "human_manager",
+  escalation_kind: "rule", escalation_mode: "intervention",
+  source: "initial_design", last_updated }
+  # max_rounds, repeat_escalation_threshold 없음: 이 엣지에는 라운드가 없다
+```
+
 **갱신 경로**:
 - `promoted_from_trace`(내부): `negotiation_log`(이벤트 로그)를 process
   mining 라이브러리(pm4py 등)로 분석해 패턴(예: "이 edge는 보통 N라운드
@@ -370,10 +366,15 @@ State 필드 단위 접근권한(agent 간, Unity Catalog의 시스템 접근통
 `intervention`은 진행을 멈추고 사람의 결정을 기다리는 건, `notice`는 알리기만
 하고 진행하는 건(사람의 결정이 없으므로 `resolution`이 없음).
 ```
-{ trigger_edge, reason, target_role: "human_manager",
+{ agent_id | null,                       # 건이 발생한 인스턴스("{company_id}:{item_id}"). 인스턴스와 무관한 엣지는 null
+  trigger_edge, reason, rationale,       # rationale: 사람이 읽는 사유 설명
+  target_role: "human_manager",
   mode: "intervention" | "notice",
   status, resolution }   # resolution은 intervention일 때만
 ```
+`reason`은 엣지마다 값 목록이 다르다. `forecast->human_manager`의 값은 세 가지다: `no_computable_assumption`(계산된
+가정이 하나도 없어 요청량을 만들 수 없음), `selection_unresolved`(가정 선택 ③), `options_exhausted`(되돌림에
+대응할 선택지가 소진됨). 세 경우 모두 `mode`는 `intervention`이고 `status`는 `"open"`으로 시작한다.
 
 ## State 접근 규칙
 
@@ -403,3 +404,6 @@ State 필드 단위 접근권한(agent 간, Unity Catalog의 시스템 접근통
   보는 총량/잔여 수준이 production_plan의 세부 스케줄(changeover 등)에 비해
   너무 거칠어 infeasible이 반복될 위험 — M5에서 negotiation_log 반복
   패턴으로 실증 확인.
+- **forecast의 사람 escalation 처리 (M4)**: `resolution`의 모양(사람이 넣는 요청량 등), 응답을 기다리는 시한과
+  시한이 지났을 때의 처리, `status` 값 목록. M2는 `status: "open"`으로 기록하는 데까지만 한다.
+  forecast를 거치지 않는 수요(human_input)의 State 반영 구조와 함께 정한다.

@@ -128,6 +128,10 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
 - 최소 구매 약정은 이미 맺은 계약 수량으로 supply_coordination의 입력이며 M4·M5에서 처리한다.
 - 되돌림: M1의 재개 지점 분기를 유지하되, 판단 함수에 되돌림 사유가
   전달되도록 확장하고 `assumption` 사유(가정 정의부터 재실행)를 추가한다.
+- 사람 escalation의 State 반영: 계산된 가정이 하나도 없을 때(`scenario` 없음), 가정 선택 ③, 되돌림 선택지 소진을
+  `escalation_records`(`agent_id`·`reason`·`rationale`)로 남기고, 건이 열려 있는 동안 supply_coordination으로
+  보내지 않는다(AGENT_NODE_LIST.md "사람 escalation 세 경우"). `interaction_protocol`에는 `forecast->human_manager`
+  의 `selection_unresolved` 항목만 둔다. 사람 입력의 처리는 M4.
 - 가정 검증 조건은 순수 함수로 구현한다(검증agent 연결은 M3).
 - 규칙이 확신하지 못하는 "애매함" 표시 기준은 구현 시 제안받아 검토한다.
 - 데이터: 로컬 고정 샘플(AGENT_NODE_LIST.md forecast agent "입력"·"외부 경계"·
@@ -167,7 +171,7 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
 - 기본 가정: 확정 프로모션 전제를 설명변수로 받는 기법이 하나도 계산되지 않으면 기본 가정이 전제 없이 우리
   주문 이력만으로(시계열 기법 포함) 계산되는지, 전제를 반영하지 못했다는 사실과 이유가 `excluded_drivers`에
   `no_applicable_method`로 기록되고 "애매함"이 표시되는지, 기본 가정이 전제 유무와 상관없이 항상 후보인지.
-- 가정 안 합치기·선택과 가정 선택: 기법이 하나/지배적/그 외, 가정이 하나/값이 비슷/뚜렷한 가정/갈림에 따라
+- 가정 안 합치기·선택과 가정 선택: 기법이 하나/지배적/그 외, 가정이 하나/값이 거의 같음/1등이 뚜렷함/값이 많이 다름에 따라
   결과(`derivation`)와 "애매함"·사람 escalation 표시가 갈리는지.
 - 가정 검증 조건 함수가 위반 케이스를 잡아내고, 요청량이 같아도 데이터나 기법이 다르면 다른 가정으로 보는지.
 - 최소 구매 약정이 forecast의 입력·가정·알림에 없는지(driver 목록에 약정이 없고, 가정 선택이 약정 인자를
@@ -180,6 +184,16 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
 - 프로모션 기록 없음: "기록 없음" 구간이 "없음"과 구분되는지, 프로모션 효과가
   기록 있는 구간으로만 계산되는지, 며칠 튄 날은 정제되고 한 달 이상 올랐다
   돌아온 구간은 `use_from`으로 잘리는지.
+- 요청량을 만들 수 없을 때: 계산된 가정이 하나도 없는 인스턴스에서 `scenario`·`selection_basis`가 `null`이고,
+  `no_computable_assumption` 건(`agent_id`, `rationale` 포함, `intervention`, `open`)이 하나만 열리며,
+  supply_coordination으로 신호가 가지 않고 검증agent 일감이 만들어지지 않는지. 다른 인스턴스는 정상 진행하는지.
+- `scenario.value = 0`(계산된 정상 값, escalation 없음)과 `scenario = null`(escalation 있음)이 구분되는지.
+- 사용할 주문이 없는 인스턴스(주문 0건, `use_from` 후 빈 경우)가 예외 없이 위 경로로 가는지.
+- ③: 값이 많이 다르고 1등 가정도 뚜렷하지 않을 때 `selection_unresolved` 건이 열리고 `scenario`에 중간값이 있으며
+  `selection_basis`가 `"rule"`이고 보내지지 않는지. 값이 많이 달라도 1등이 뚜렷하면 건이 열리지 않는지.
+- 같은 스냅샷으로 다시 돌려도 같은 `(agent_id, reason)`의 열린 건이 중복 생성되지 않는지.
+- `interaction_protocol`에 `forecast->human_manager`(`selection_unresolved`) 항목이 있고 나머지 두 reason에는
+  항목이 없는지. 조회 키가 `(edge, escalation_trigger)`로 동작하는지.
 - 월별 합산: 마지막 불완전한 달이 제외되는지.
 - 반환 스키마가 공통 pydantic 모델(`{판단값, 근거}`)인지(공통 규칙 2, M7 교체 대비).
 - DESIGN.md 갱신: "진행 상황"에 M2 요약, 데이터 대체 가정(Favorita store→고객사
@@ -244,6 +258,8 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
   기준(`supply_coordination->human_manager`, 구속력 없음이 더 낮음)을 넘으면 알림만 보내고
   진행을 멈추지 않는다. 검증: 구속력 있으면 배분이 약정 잔여량 이상인지, 같은 차이에서
   구속력 없는 쪽만 알림이 나가는 경우를 재현하고 알림 후에도 진행이 멈추지 않는지.
+- forecast의 사람 escalation 처리: `resolution` 모양, 응답 대기 시한과 시한 초과 시 처리, `status` 값 목록
+  (STATE_SCHEMA.md "아직 정하지 않은 것"). 사람이 처리한 뒤 `scenario`/`selection_basis`를 어떻게 이어 진행하는지.
 
 **검증**
 - 3개 이상 인스턴스 동시 실행 시 한 인스턴스가 응답을 기다리는 동안 다른 인스턴스가 실제로

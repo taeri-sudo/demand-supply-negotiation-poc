@@ -138,7 +138,7 @@ escalation 발생 시 반응(알림은 받기만 함), 지속 태스크 아님.
      사유)이 연속 K회 반복되면 "이 agent 선에서 구조적으로 안 풀림"으로
      간주해 `max_rounds` 소진을 기다리지 않고 상위로 확장**하는 판단도
      작성agent 쪽의 몫 — K는 `interaction_protocol`의
-     `repeat_escalation_threshold`(edge별 기준값 하나, 예: 3)이고, 실제
+     `repeat_escalation_threshold`(STATE_SCHEMA.md)이고, 실제
      "몇 번 반복됐는지"는 별도로 저장하지 않음 — 그 edge의
      `exchanges`/`round_history`를 최근 것부터 훑어 같은 사유가 연속
      몇 개인지 그때그때 계산. **이 카운트는 edge+사유 단위로만 유효** —
