@@ -292,6 +292,7 @@ priority_queue_entry = { agent_id, wait_start_ts, revenue_impact,
 ```
 
 ### 5. `interaction_protocol[]`
+이 표는 코드가 조회하는 엣지별 기준값(max_rounds, repeat_escalation_threshold, 알림 기준, 처리 모드 등)을 담는다. 트레이싱·상호작용 기록이나 외부 벤치마크로 조정할 값이 있는 엣지만 두고, 값이 고정인 경우는 두지 않는다. 엣지의 흐름은 GRAPH_FLOW.md에 있다.
 agent 역할 간 상호작용 규칙(동역학). `scope`는 인스턴스 나열이 아니라 역할
 태그.
 ```
