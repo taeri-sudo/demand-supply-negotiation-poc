@@ -8,6 +8,8 @@ from pydantic import ValidationError
 from sop.state import (
     Driver,
     EscalationRecord,
+    ExcludedAssumption,
+    ExcludedDriver,
     Evidence,
     ExcludedSource,
     ForecastRecord,
@@ -20,6 +22,7 @@ from sop.state import (
     State,
     SuspectedCause,
     ValidationResult,
+    send_back_reason,
 )
 
 
@@ -100,10 +103,28 @@ def test_kind_and_item_scope_are_independent_and_all_nine_combinations_are_valid
             Evidence(kind=kind, item_scope=scope)
 
 
-def test_excluded_source_reason_is_irrelevant_only():
+def test_excluded_source_reason_is_irrelevant_or_contaminated():
     assert ExcludedSource(kind="market", item_scope="category").reason == "irrelevant"
+    assert ExcludedSource(kind="pos", item_scope="same_item", reason="contaminated").reason == "contaminated"
     with pytest.raises(ValidationError):
-        ExcludedSource.model_validate({"kind": "market", "item_scope": "category", "reason": "contaminated"})
+        ExcludedSource.model_validate({"kind": "market", "item_scope": "category", "reason": "unknown"})
+
+
+def test_excluded_assumption_reason_is_no_applicable_method_or_a_send_back_reason():
+    assert ExcludedAssumption(assumption_id="A", reason="no_applicable_method", rationale="x").reason == "no_applicable_method"
+    causes = [
+        (SuspectedCause(type="assumption", issue="no_evidence", assumption_id="A"), "assumption:no_evidence"),
+        (
+            SuspectedCause(type="data_source", issue="contaminated", source=SourceRef(kind="pos", item_scope="same_item")),
+            "data_source:contaminated",
+        ),
+        (SuspectedCause(type="method_selection"), "method_selection"),
+    ]
+    for cause, expected in causes:
+        assert send_back_reason(cause) == expected
+        assert ExcludedAssumption(assumption_id="A", reason=expected, rationale="x").reason == expected
+    with pytest.raises(ValidationError):
+        ExcludedAssumption(assumption_id="A", reason="data_source:unknown", rationale="x")
 
 
 @pytest.mark.parametrize(
@@ -114,17 +135,17 @@ def test_suspected_cause_assumption_accepts_only_assumption_issues(issue):
     assert cause.issue == issue
 
 
-@pytest.mark.parametrize("issue", ["insufficient", "contaminated", "irrelevant"])
+@pytest.mark.parametrize("issue", ["insufficient", "contaminated", "irrelevant", "outdated"])
 def test_suspected_cause_data_source_accepts_only_data_source_issues(issue):
     cause = SuspectedCause(
         type="data_source",
         issue=issue,
-        source=SourceRef(kind="orders", item_scope="same_item"),
-        use_from=date(2016, 1, 1) if issue == "irrelevant" else None,
+        source=SourceRef(kind="pos", item_scope="same_item"),
+        use_from=date(2016, 1, 1) if issue == "outdated" else None,
     )
     assert cause.issue == issue
     assert cause.source is not None
-    assert cause.source.kind == "orders"
+    assert cause.source.kind == "pos"
 
 
 def test_suspected_cause_method_selection_has_no_issue():
@@ -170,9 +191,44 @@ def test_supply_coordination_to_human_manager_notice_protocol_entry():
 
 def test_escalation_record_mode_distinguishes_notice_from_intervention():
     notice = EscalationRecord(
-        trigger_edge="supply_coordination->human_manager", reason="commitment_gap", mode="notice", status="sent"
+        trigger_edge="supply_coordination->human_manager", reason="commitment_gap", rationale="약정 차이 초과",
+        mode="notice", status="sent",
     )
     assert notice.resolution is None
-    assert EscalationRecord(trigger_edge="e", reason="r", status="open").mode == "intervention"
+    default = EscalationRecord(trigger_edge="e", reason="r", rationale="x", status="open")
+    assert default.mode == "intervention" and default.agent_id is None
     with pytest.raises(ValidationError):
-        EscalationRecord.model_validate({"trigger_edge": "e", "reason": "r", "mode": "silent", "status": "open"})
+        EscalationRecord.model_validate(
+            {"trigger_edge": "e", "reason": "r", "rationale": "x", "mode": "silent", "status": "open"}
+        )
+
+
+def test_excluded_driver_reason_is_a_driver_reason_or_a_send_back_reason():
+    base = {"driver": "category_trend", "assumption_ids": ["A"], "rationale": "x"}
+    assert ExcludedDriver(reason="no_evidence", **base).reason == "no_evidence"
+    assert ExcludedDriver(reason="assumption:value_out_of_range", **base).reason == "assumption:value_out_of_range"
+    with pytest.raises(ValidationError):
+        ExcludedDriver(reason="unknown", **base)
+
+
+def test_suspected_cause_targets_follow_the_type():
+    pos = SourceRef(kind="pos", item_scope="same_item")
+    orders = SourceRef(kind="orders", item_scope="same_item")
+    with pytest.raises(ValidationError):
+        SuspectedCause(type="assumption", issue="no_evidence")  # 대상 가정이 필요하다
+    with pytest.raises(ValidationError):
+        SuspectedCause(type="data_source", issue="contaminated", source=pos, assumption_id="A")  # 가정 ID가 없다
+    with pytest.raises(ValidationError):
+        SuspectedCause(type="data_source", issue="contaminated")  # 소스가 필요하다
+    with pytest.raises(ValidationError):
+        SuspectedCause(type="method_selection", assumption_id="A")  # 대상은 모든 가정이다
+    with pytest.raises(ValidationError):
+        SuspectedCause(type="data_source", issue="irrelevant", source=pos, use_from=date(2016, 1, 1))  # use_from은 outdated만
+    assert SuspectedCause(type="data_source", issue="insufficient").source is None  # 소스 없이도 가능하다
+    # 허용되지 않는 판정: orders는 항상 쓰므로 소스를 제외할 수 없어 irrelevant를 받지 않고 outdated만 받는다
+    with pytest.raises(ValidationError):
+        SuspectedCause(type="data_source", issue="irrelevant", source=orders)
+    with pytest.raises(ValidationError):
+        SuspectedCause(type="data_source", issue="outdated", source=orders)  # use_from이 필수다
+    assert SuspectedCause(type="data_source", issue="outdated", source=orders, use_from=date(2016, 1, 1)).use_from
+    assert SuspectedCause(type="data_source", issue="irrelevant", source=pos).use_from is None

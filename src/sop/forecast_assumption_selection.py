@@ -27,10 +27,9 @@ from .judgment_thresholds import (
     MAX_ASSUMPTIONS_FOR_SELECTION,
 )
 from .logging_utils import log
-from .state import Assumption, EscalationRecord
+from .state import Assumption
 
 ROLE_TAG = "forecast"
-ASSUMPTION_SPLIT_EDGE = "forecast->human_manager"
 _TOLERANCE_DIGITS = 9  # 기준값 경계에서 부동소수점 오차로 판정이 갈리지 않게 반올림
 
 
@@ -122,20 +121,3 @@ def select_forecast_assumption(assumptions: list[Assumption]) -> StructuredJudgm
     log(ROLE_TAG, "select_forecast_assumption", derivation=result.judgment["scenario"]["derivation"],
         value=result.judgment["scenario"]["value"], ambiguous=result.ambiguous, escalate=result.judgment["escalate"])
     return result
-
-
-def escalation_records_for(selection: StructuredJudgment) -> list[EscalationRecord]:
-    """사람 escalation이 필요하면 진행을 멈추고 결정을 기다리는 `intervention` 기록을 반환한다.
-
-    State에 쓰는 일은 호출부가 한다.
-    """
-    if not selection.judgment["escalate"]:
-        return []
-    return [
-        EscalationRecord(
-            trigger_edge=ASSUMPTION_SPLIT_EDGE,
-            reason=selection.reasoning,
-            mode="intervention",
-            status="pending",
-        )
-    ]

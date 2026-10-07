@@ -13,11 +13,11 @@ supply_coordination 태스크는 그때그때 도착한 만큼만 보고 판단 
 forecast agent((회사,item) 인스턴스별 1개, 총 N개, role_tag: forecast) — 지속 태스크
    (가정 정의→데이터 수집·소스 판단→통계기법 선택→가정별 요청량 예측값 계산→
     가정 선택을 한 agent 내부 단계로 수행)
-        ↕  (신호 기반, 평소 정방향 최적화 / 예외 시에만 역방향 핸드오프)
+        ↕  (신호 기반, 평소 정방향 최적화 / 예외 시에만 역방향 send-back)
 supply_coordination agent(1개, role_tag: supply_coordination) — 지속 태스크
    ↕procurement_plan   ↕production_plan   ↕logistics_plan  (각 1개, 지속 태스크)
    (hub-and-spoke — 셋 다 직접 연결, 사슬 아님. 순서는 의존관계에 따른
-    호출 순서일 뿐, 건너뛰기/역방향 되돌림 모두 구조적으로 가능)
+    호출 순서일 뿐, 건너뛰기/역방향 send-back 모두 구조적으로 가능)
         ↓
 실제 조달/생산/배송 (그래프 노드 아님, 외부 경계 — sales_channel과 같은 성격)
 
@@ -28,7 +28,7 @@ validation agent(들) — 일감은 이벤트 트리거·무기억 워커풀 방
 escalation 발생 시 반응(알림은 받기만 함), 지속 태스크 아님.
 
 문제 발생 시: 공급망계획agent → supply_coordination → (필요시) forecast/
-채널/사람 escalation — 어디까지 되돌릴지는 interaction_protocol이
+채널/사람 escalation — 어디까지 send-back 또는 escalation할지는 interaction_protocol이
 규정.
 ```
 
@@ -58,7 +58,7 @@ escalation 발생 시 반응(알림은 받기만 함), 지속 태스크 아님.
 
 실행 리듬은 실시간 연속 스트림이 아니라 **계획 주기**(월간 등) 기반이다.
 - 주기가 시작될 때 그 시점까지의 데이터로 **스냅샷을 고정**하고, 주기
-  동안(되돌림 재실행 포함) 모든 agent는 이 스냅샷만 본다
+  동안(재실행 포함) 모든 agent는 이 스냅샷만 본다
 - 주기 중 발생한 실제 주문은 실행층(sales_channel)의 일이며 다음 주기
   스냅샷에 반영된다
 - POS 공유 지연은 스냅샷 기준일보다 앞선 데이터까지만 포함하는 식으로
@@ -79,12 +79,29 @@ escalation 발생 시 반응(알림은 받기만 함), 지속 태스크 아님.
 넣으면 아무도 안 깨어난다. 값을 쓰는 wrapper 함수(`set_field`)가 값 기록과
 동시에 해당 큐에 push하도록 구현해야 함(업무 로직이 매번 기억할 필요 없게).
 
+## send-back·재실행 관련 용어
+
+이 절이 아래 용어의 유일한 정의다. AGENT_NODE_LIST.md와 STATE_SCHEMA.md는 이 절을 참조만 한다.
+
+| 용어 | 정의 |
+|---|---|
+| **send-back** | agent가 낸 결과에 문제가 있어 그 결과를 낸 agent에게 다시 만들라고 돌려보내는 것. 보내는 쪽은 검증agent(`flagged` + `suspected_cause`) 또는 supply_coordination(공급망계획agent의 infeasible 때문에 forecast·채널로)이다. agent 사이의 일이다. |
+| **재실행(re-run)** | send-back을 받은 agent가 자기 내부 단계를 다시 도는 것. agent 내부의 일이다. 같은 입력이면 같은 결과가 나오므로 send-back 이유를 입력에 넣어 입력을 바꾼 채 돈다. 구체 정의는 지금 forecast만 있고(AGENT_NODE_LIST.md), 다른 agent는 해당 마일스톤에서 정한다. |
+| **재개 지점** | 재실행이 시작되는 agent 내부 단계(send-back 이유로 정해진다). |
+| **라운드** | supply_coordination↔공급망계획agent 사이 요청·응답 한 번(`exchanges`/`round_history`). 라운드 연장과 `max_rounds`는 이 엣지에만 있다. |
+| **재조정** | supply_coordination이 자체로 푸는 것. |
+| **상위로 확장** | agent 사이에서 같은 이유가 `repeat_escalation_threshold`번 연속 반복되면 `max_rounds` 소진을 기다리지 않고 위/옆 agent 또는 사람으로 넘기는 것. **재실행(agent 내부)에는 쓰지 않는다.** |
+| **재시도(retry)** | 검증agent의 검증 절차가 비정상 종료(`check_failed`, 시스템 장애)했을 때 같은 입력으로 그대로 다시 하는 것. 재실행과 달리 바꾸는 것이 없다. |
+| **제외** | 가정이나 소스를 쓰지 않는 것(`excluded_assumptions`, `excluded_sources`). |
+| **소진** | 두 가지이고 섞지 않는다. `max_rounds` 소진(라운드 수 상한)과 `options_exhausted`(forecast 재실행으로 가정이 모두 제외됨). |
+| **escalation** | 사람(human_manager)에게 올리는 것(`intervention`/`notice`). |
+
 ## 검증agent
 
 **검증agent는 판정 권한만 갖고, 라우팅 권한은 갖지 않는다.** "값이 문제
-없는지"는 검증agent가 판단하지만, "문제가 생겼을 때 그걸 어디로 되돌릴지"는
-이미 각 agent 자신의 기존 역할에 있는 권한이다 — forecast의 핸드오프
-되돌림, supply_coordination의 "공급망계획agent 문제 신호 처리" 판단 등.
+없는지"는 검증agent가 판단하지만, "문제가 생겼을 때 그걸 어디로 send-back할지"는
+이미 각 agent 자신의 기존 역할에 있는 권한이다 — forecast의
+재실행, supply_coordination의 "공급망계획agent 문제 신호 처리" 판단 등.
 검증agent가 라우팅까지 대신하면 이 권한이 중복된다.
 
 흐름:
@@ -115,9 +132,8 @@ escalation 발생 시 반응(알림은 받기만 함), 지속 태스크 아님.
        `passed`면, `procurement_plan`이 스스로 확인해서 처리.
      - **받는 쪽이 조율 성격**(계속 능동적으로 여러 요청을 처리·판단하는
        agent — `supply_coordination`): 검증agent가 **push**한다(원래
-       의도했던 목적지 채널로 — `flagged`가 쓰는 `validation_result.
-       {role_tag}`와는 다른, 그 값의 정상적인 수신 채널). `supply_coordination`은
-       우선순위 계산·"공급망계획agent 문제 신호 처리" 같은 다른
+       의도했던 목적지 채널로 — `flagged`가 쓰는 `validation_result.{role_tag}`와는 다른, 그 값의 정상적인 수신 채널).
+       `supply_coordination`은 우선순위 계산·"공급망계획agent 문제 신호 처리" 같은 다른
        판단을 계속 수행 중이라, 검증 결과 확인을 스스로 챙기게 하면 그
        판단 업무에 부담이 됨 — 그래서 검증agent가 대신 알려준다. (`procurement_plan` 등
        워커풀 성격 agent에는 이 이유가 해당 안 됨 — 안건 단위 확인이
@@ -131,23 +147,23 @@ escalation 발생 시 반응(알림은 받기만 함), 지속 태스크 아님.
      제공자)의 `validation_result.{role_tag}` 채널로 **push**한다 —
      pull만으로는 작성agent가 "자기 값에 문제가 생겼는지"를 미리 알 수
      없어 깨어나지 못하기 때문(그래서 이 경우만 push가 필요). **검증agent는
-     "누구에게 문제가 있는지"만 알리고, "그 문제를 어디로 되돌릴지"는
-     판단하지 않는다** — 이후 처리(자체 재조정할지, 더 위로 되돌릴지)는
+     "누구에게 문제가 있는지"만 알리고, "그 문제를 어디로 send-back할지"는
+     판단하지 않는다** — 이후 처리(자체 재조정할지, 더 위로 send-back할지)는
      작성agent 자신의 기존 역할이 판단한다(검증agent가 그래프 구조 전체를
      알아야 하는 상황을 피하기 위함). **같은 `routing_reason`(또는 거부
-     사유)이 연속 K회 반복되면 "이 agent 선에서 구조적으로 안 풀림"으로
+     이유)이 연속 K회 반복되면 "이 agent 선에서 구조적으로 안 풀림"으로
      간주해 `max_rounds` 소진을 기다리지 않고 상위로 확장**하는 판단도
      작성agent 쪽의 몫 — K는 `interaction_protocol`의
      `repeat_escalation_threshold`(STATE_SCHEMA.md)이고, 실제
      "몇 번 반복됐는지"는 별도로 저장하지 않음 — 그 edge의
-     `exchanges`/`round_history`를 최근 것부터 훑어 같은 사유가 연속
-     몇 개인지 그때그때 계산. **이 카운트는 edge+사유 단위로만 유효** —
+     `exchanges`/`round_history`를 최근 것부터 훑어 같은 이유가 연속
+     몇 개인지 그때그때 계산. **이 카운트는 edge+이유 단위로만 유효** —
      다른 edge로 넘어가면(예: 상위로 확장돼 다른 agent가 처리) 그 agent의
      기록에서 새로 계산되므로 자동으로 리셋됨(누적 이월 없음)
    - **`check_failed`**(검증 절차 자체가 비정상 종료 — 판단 문제가 아니라
      시스템 장애): 라우팅 판단이 아니라 장애 처리라 성격이 달라 기존
      그대로 유지 — 검증agent가 몇 차례 자체 재시도 → 그래도 안 되면
-     escalation 큐로 **push**("시스템 장애" 사유, "판단 이상"과 구분).
+     escalation 큐로 **push**("시스템 장애" 이유, "판단 이상"과 구분).
      **다음 agent는 이 상태의 레코드를 받지 않음**(워커풀 성격이면
      pull 대상에서, 조율 성격이면 push 대상에서 제외 — 검증 미해결
      상태로 방치되지 않도록 어느 경로로도 전달되지 않음)
@@ -170,22 +186,22 @@ escalation 발생 시 반응(알림은 받기만 함), 지속 태스크 아님.
 
 ## 상호작용 세 가지 유형
 
-- **핸드오프형** (supply_coordination→forecast, 역방향·예외): 같은 값을
-  다듬는 게 아니라 **재실행 지시** — 되돌림을 받으면 이전 결과를 이어서
+- **핸드오프형** (supply_coordination이 forecast에 send-back을 보내는 유형, 역방향·예외): 같은 값을
+  다듬는 게 아니라 **send-back** — send-back을 받으면 이전 결과를 이어서
   다듬는 게 아니라 새로 계산해서 덮어씀(현재값만 유지, 이력은
   negotiation_log). 공급망계획agent가 infeasible을 보냈을 때만 열리는
   예외 경로 — 평소엔 아예 열리지 않는다. infeasible은 "숫자를 조금씩
   좁혀가며 밀당"할 대상이 아니라 "선택이 틀렸을 수 있으니 다시 하라"는
   신호이므로, 새 라운드 메커니즘을 만들지 않고 forecast agent 자신의
   내부 재실행 메커니즘을 그대로 재사용한다. `suspected_cause`에 따른 재개
-  지점과 대응은 AGENT_NODE_LIST.md forecast agent "되돌림" 참고.
+  지점과 대응은 AGENT_NODE_LIST.md forecast agent "재실행" 참고.
 - **최적화** (forecast→supply_coordination 정방향, 평소 경로): forecast가
   가정 선택이 정한 최종 요청량(`scenario`)을 supply_coordination이 우선순위 점수 산출 후
   `allocation_candidate`로 생성하는 **단방향 전달** — 라운드가 쌓이지
   않는다. 상대의 응답을 받아 값을 조정하는 절차가 아니라 한 번의 계산으로
   끝나므로 "협상"이 아니다. 다만 이건 **협상 응답(값 조정)이 없다는
   뜻일 뿐**, 검증을 아예 안 거친다는 뜻은 아니다 — 검증agent의 `flagged`
-  되돌림 경로(아래 "검증agent" 참고)는 다른 모든 엣지와 동일하게 이
+  send-back 경로(아래 "검증agent" 참고)는 다른 모든 엣지와 동일하게 이
   엣지에도 적용된다.
 - **라운드 누적형(협상)** (supply_coordination↔공급망계획agent들):
   `round_history`/`exchanges` 배열에 **누적** — 이전 라운드를 지우지 않고
@@ -199,11 +215,11 @@ escalation 발생 시 반응(알림은 받기만 함), 지속 태스크 아님.
 
 같은 agent 쌍(forecast/supply_coordination) 사이에도 방향에 따라 유형이
 갈릴 수 있다 — 평소엔 정방향 최적화만 흐르고, 공급망계획agent의 infeasible
-신호로 supply_coordination이 되돌림을 시작했을 때만 역방향 핸드오프
-(재실행 지시)가 열린다(엣지 표 참고).
+신호로 supply_coordination이 forecast에 send-back을 보낼 때만 역방향 핸드오프형이
+쓰인다(엣지 표 참고).
 
 세 유형 모두 검증agent의 판정을 받는다 — `flagged`면 작성agent에게
-되돌아가고, `check_failed`면 다음 소비자가 그 레코드를 걸러낸다(위
+send-back되고, `check_failed`면 다음 소비자가 그 레코드를 걸러낸다(위
 "검증agent" 참고).
 
 ## 공급망계획agent 연결 구조 — hub-and-spoke, 사슬(chain) 아님
@@ -221,7 +237,7 @@ supply_coordination은 procurement_plan·production_plan·logistics_plan agent
 | edge | 유형 | 반복 여부 | 종료조건 | escalation 대상 |
 |---|---|---|---|---|
 | forecast → supply_coordination (정방향, 평소) | 단방향 전달(최적화) | 아니오 | forecast가 정한 최종 요청량(`scenario`)을 우선순위 점수 산출 후 allocation_candidate로 생성 | 없음 |
-| supply_coordination → forecast (역방향, 예외) | 핸드오프형 — 공급망계획agent(procurement_plan 등)가 infeasible을 보냈을 때만 열림 | 아니오 | 재실행 완료(재개 지점부터) | 없음(forecast 자신의 가정 선택 판단3계층 — ③ 사람 escalation 포함 — 에 위임) |
+| supply_coordination → forecast (역방향, 예외) | 핸드오프형 — 공급망계획agent(procurement_plan 등)가 infeasible을 보냈을 때만 supply_coordination이 forecast에 send-back을 보냄 | 아니오 | 재실행 완료(재개 지점부터) | 없음(forecast 자신의 가정 선택 판단3계층 — ③ 사람 escalation 포함 — 에 위임) |
 | supply_coordination ↔ procurement_plan | 라운드 누적형 | 예 | `response_status: feasible` | max_rounds 소진 → 사람, 또는 공급망조율 판단으로 forecast/채널까지 재확장 |
 | supply_coordination ↔ production_plan | 라운드 누적형 | 예 | 위와 동일 | 위와 동일 |
 | supply_coordination ↔ logistics_plan | 라운드 누적형 | 예 | 위와 동일 | 위와 동일 |
@@ -230,7 +246,7 @@ supply_coordination은 procurement_plan·production_plan·logistics_plan agent
 | human_input → supply_coordination | 단방향(입력) — forecast를 거치지 않는 수량 | 아니오 | 즉시(배분 대상에 포함) | 없음 |
 | sales_channel → supply_coordination | 단방향(입력) — 최소 구매 약정·공급 보장 물량·MOQ | 아니오 | 즉시(주기 스냅샷 기준, 처리 규칙은 M4·M5) | 없음 |
 | supply_coordination → human_manager | 단방향(알림) — 최소 구매 약정과 배분의 차이, 진행을 멈추지 않음 | 아니오 | 즉시(알림 전달, 구현은 M4·M5) | 없음 |
-| 작성 agent → validation agent(들) | 판정(라우팅 권한 없음) | 아니오 | `passed`/`flagged`/`check_failed` 판정 | check_failed 반복 시 사람(시스템 장애 사유) |
+| 작성 agent → validation agent(들) | 판정(라우팅 권한 없음) | 아니오 | `passed`/`flagged`/`check_failed` 판정 | check_failed 반복 시 사람(시스템 장애 이유) |
 | escalation_trigger → human_manager | 단방향 | 아니오 | 사람의 resolution 입력 | (최종 단계) |
 
 공급망계획agent 간 직접 상호작용(procurement_plan↔production_plan 등)은

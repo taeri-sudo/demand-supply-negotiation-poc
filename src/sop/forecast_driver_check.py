@@ -1,16 +1,16 @@
-"""forecast agent "통계기법 선택"의 첫 판단 — 요인 확인(요인의 근거가 있는지).
+"""forecast agent "통계기법 선택"의 첫 판단 — 원인 확인(원인의 근거가 있는지).
 
-가정 정의가 선언한 요인마다 수집된 근거로 효과가 있는지 확인하고, 없는 요인을 단 가정을 제외한다.
-요인의 효과 크기는 여기서 정하지 않는다(요청량은 통계기법이 계산한다).
+가정 정의가 선언한 원인마다 수집된 근거로 효과가 있는지 확인하고, 없는 원인을 단 가정을 제외한다.
+원인의 효과 크기는 여기서 정하지 않는다(요청량은 통계기법이 계산한다).
 
 - `category_trend`: 시장 변화율이 우리 수요 변화율에 주는 영향을 통계로 추정해(`category_trend.py`)
   신뢰구간이 0을 포함하면 `no_significant_effect`, 근거를 수집하지 못했거나 데이터가 모자라면
-  `no_evidence`로 이 요인을 단 가정을 제외한다.
+  `no_evidence`로 이 원인을 단 가정을 제외한다.
 - `event`(모든 가정의 전제): 기록된 프로모션 달과 기록된 비프로모션 달이 각각 충분해야 한다
   (`EVENT_MIN_PROMO_MONTHS`, `EVENT_MIN_NON_PROMO_MONTHS`). 부족하면 가정을 제외하지 않고 전제만
-  모든 가정에서 뺀다. 프로모션 효과는 기록 있는 구간으로만 센다(기록 없음은 세지 않는다).
+  모든 가정에서 제외한다. 프로모션 효과는 기록 있는 구간으로만 센다(기록 없음은 세지 않는다).
 
-뺀 요인과 이유, 영향받은 가정은 `ExcludedDriver`로 State에 남긴다.
+제외한 원인과 이유, 영향받은 가정은 `ExcludedDriver`로 State에 남긴다.
 """
 
 from dataclasses import dataclass, field
@@ -30,7 +30,7 @@ ROLE_TAG = "forecast"
 
 @dataclass
 class DriverCheck:
-    assumptions: list[Assumption]  # 요인 확인을 통과한 가정
+    assumptions: list[Assumption]  # 원인 확인을 통과한 가정
     premises: list[Driver]  # 근거가 있는 전제
     excluded_drivers: list[ExcludedDriver] = field(default_factory=list)
     judgments: list[StructuredJudgment] = field(default_factory=list)
@@ -73,7 +73,12 @@ def check_drivers(
     collection: DataCollectionResult,
     planning_month: pd.Timestamp,
 ) -> DriverCheck:
-    """요인마다 근거를 확인하고, 근거가 없는 요인을 단 가정과 근거가 없는 전제를 뺀다."""
+    """원인마다 근거를 확인하고, 근거가 없는 원인을 단 가정과 근거가 없는 전제를 제외한다.
+
+    사용할 주문이 없어 계산할 수 없는 수집 결과면 확인하지 않고 입력을 그대로 돌려준다.
+    """
+    if collection.unusable_reason is not None or collection.observed_start is None:
+        return DriverCheck(assumptions=list(assumptions), premises=list(premises))
     judgments: list[StructuredJudgment] = []
     failed: dict[DriverName, StructuredJudgment] = {}
 
@@ -92,7 +97,7 @@ def check_drivers(
             missing = [f"{k[0]}/{k[1]}" for k in (("pos", "same_item"), ("market", "category")) if k not in collection.evidence_series]
             trend = StructuredJudgment(
                 judgment={"decision": "no_evidence", "unavailable": missing},
-                reasoning=f"category_trend 요인 근거 없음: {missing} 수집 불가",
+                reasoning=f"category_trend 원인 근거 없음: {missing} 수집 불가",
             )
         judgments.append(trend)
         if trend.judgment["decision"] != "significant_effect":

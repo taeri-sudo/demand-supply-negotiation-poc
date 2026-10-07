@@ -101,7 +101,7 @@ def test_instance_with_enough_history_uses_only_the_base_data():
 # --- 소스: 이력이 짧으면 보강 -----------------------------------------------------------------
 
 
-def test_short_history_instance_is_supplemented_from_pos_and_category():
+def test_short_history_instance_is_supplemented_from_the_same_item_pos_first():
     pos = pos_frame(start="2013-01-01", record_start="2013-01-01")
     orders = orders_from_pos(pos, "2017-01-01", first_factor=1.0)  # 7개월
     month = pos["date"].dt.to_period("M").dt.to_timestamp()
@@ -114,7 +114,8 @@ def test_short_history_instance_is_supplemented_from_pos_and_category():
     assert result.n_observed_months == 7 < MIN_HISTORY_MONTHS
     assert len(result.training_series) == HISTORY_TARGET_MONTHS
     kinds = {(s.kind, s.item_scope) for s in result.data_sources}
-    assert kinds == {("orders", "same_item"), ("pos", "same_item"), ("pos", "category")}
+    # 같은 item의 POS가 모든 달을 채우므로 상위 단위 데이터(상품군 POS)는 쓰지 않는다
+    assert kinds == {("orders", "same_item"), ("pos", "same_item")}
     # 보강한 앞쪽 값은 주문 수준(POS의 0.9배)에 맞춰져 있다
     backcast = result.training_series[result.training_series.index < result.observed_start]
     expected = pos_monthly.reindex(backcast.index) * 0.9
@@ -122,8 +123,8 @@ def test_short_history_instance_is_supplemented_from_pos_and_category():
     assert decisions(result, "history_supplemented")
 
 
-def test_short_history_instance_adds_available_sources_with_no_fixed_priority():
-    """같은 item POS가 없으면 그 상황에 존재하는 다른 데이터(상품군 POS, 시장)로 보강한다."""
+def test_short_history_instance_mixes_available_sources_of_the_same_priority():
+    """같은 item POS가 없으면 상위 단위 데이터(상품군 POS, 시장)를 같은 우선순위로 섞어 보강한다."""
     pos = pos_frame(start="2013-01-01", record_start="2013-01-01")
     month = pos["date"].dt.to_period("M").dt.to_timestamp()
     pos_monthly = pos.groupby(month)["quantity"].sum().loc["2013-01-01":"2017-07-01"]  # pyright: ignore[reportCallIssue, reportArgumentType] -- pandas-stubs가 DatetimeIndex·Series를 groupby 기준으로 받는 호출 형태를 허용하지 않음
@@ -145,6 +146,40 @@ def test_short_history_instance_adds_available_sources_with_no_fixed_priority():
     assert market_source.refs == ["D152"]  # DAIRY의 시장 그룹
 
 
+def _long_pos_and_category():
+    pos = pos_frame(start="2013-01-01", record_start="2013-01-01")
+    month = pos["date"].dt.to_period("M").dt.to_timestamp()
+    pos_monthly = pos.groupby(month)["quantity"].sum().loc["2013-01-01":"2017-07-01"]  # pyright: ignore[reportCallIssue, reportArgumentType] -- pandas-stubs가 DatetimeIndex·Series를 groupby 기준으로 받는 호출 형태를 허용하지 않음
+    wobble = 1 + 0.1 * np.sin(np.arange(len(pos_monthly)))  # 상품군 POS가 우리 POS와 정확히 비례하지는 않는다
+    return pos, category_frame((pos_monthly * 7 * wobble).to_numpy(), "2013-01-01")
+
+
+def test_backcast_months_use_the_highest_priority_source_that_has_them_and_fall_back_to_the_next():
+    pos, category = _long_pos_and_category()
+    short_pos = pos[pos["date"] >= pd.Timestamp("2016-01-01")]  # 같은 item POS는 2016-01부터만 있다
+    inputs = make_inputs(orders_from_pos(pos, "2017-01-01", first_factor=1.0), short_pos, category)
+
+    result = collect_instance_data(inputs)
+
+    kinds = {(s.kind, s.item_scope) for s in result.data_sources}
+    assert kinds == {("orders", "same_item"), ("pos", "same_item"), ("pos", "category")}  # 2015년 이전 달은 상품군 POS
+    assert len(result.training_series) == HISTORY_TARGET_MONTHS
+
+
+def test_each_assumption_is_supplemented_independently_starting_from_its_own_sources():
+    pos, category = _long_pos_and_category()
+    inputs = make_inputs(orders_from_pos(pos, "2017-01-01", first_factor=1.0), pos, category)
+
+    result = collect_instance_data(inputs, assumption_sources={"A-OWN": frozenset({("pos", "category")}), "A-NONE": frozenset()})
+
+    own, none = result.training_for("A-OWN"), result.training_for("A-NONE")
+    assert len(own) == len(none) == HISTORY_TARGET_MONTHS
+    assert not np.allclose(own.to_numpy(), none.to_numpy())  # 우선순위가 달라 같은 달의 보강값이 다르다
+    assert np.allclose(none.to_numpy(), result.training_series.to_numpy())  # 원인이 없는 가정이 기본 시리즈다
+    assert result.training_for("A-UNKNOWN") is result.training_series
+    assert {(s.kind, s.item_scope) for s in result.data_sources} >= {("pos", "same_item"), ("pos", "category")}
+
+
 def test_irrelevant_candidate_goes_to_excluded_sources_and_is_not_used():
     pos = pos_frame(start="2013-01-01", record_start="2013-01-01")
     orders = orders_from_pos(pos, "2017-01-01", first_factor=1.0)
@@ -157,7 +192,7 @@ def test_irrelevant_candidate_goes_to_excluded_sources_and_is_not_used():
 
     assert [(e.kind, e.item_scope, e.reason) for e in result.excluded_sources] == [("pos", "category", "irrelevant")]
     assert ("pos", "category") not in {(s.kind, s.item_scope) for s in result.data_sources}
-    assert decisions(result, "supplement_excluded")
+    assert [j.judgment["issue"] for j in decisions(result, "irrelevant_source_excluded")] == ["irrelevant"]
 
 
 def test_without_any_supplement_data_a_short_history_needs_human():
@@ -235,7 +270,7 @@ def test_first_order_far_above_usual_demand_sets_use_from_to_the_next_month():
 
     assert result.data_sources[0].use_from == pd.Timestamp("2014-09-01").date()
     assert result.observed_start == pd.Timestamp("2014-09-01")
-    assert decisions(result, "first_order_use_from")
+    assert [j.judgment["issue"] for j in decisions(result, "outdated_first_order_use_from")] == ["outdated"]
 
 
 def test_first_order_close_to_usual_demand_keeps_all_months():
@@ -262,6 +297,7 @@ def test_unlabeled_promotion_that_returns_sets_use_from_after_the_episode():
     assert len(episodes) == 1 and not episodes[0].ambiguous
     use_from = result.data_sources[0].use_from
     assert use_from is not None and pd.Timestamp("2013-06-10") <= pd.Timestamp(use_from) <= pd.Timestamp("2013-06-30")
+    assert result.observed_start is not None
     assert result.observed_start >= pd.Timestamp(use_from)
     assert result.observed_start <= pd.Timestamp("2013-08-01")
 

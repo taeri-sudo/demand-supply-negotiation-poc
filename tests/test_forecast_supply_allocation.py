@@ -1,7 +1,7 @@
 import pytest
 
 from sop.access import StateStore
-from sop.analysis_stub import get_stub_assumptions
+from assumption_fixtures import fixed_assumptions
 from sop.forecast_supply_allocation import (
     allocate_forecast_candidate,
     run_forecast_select_and_allocate,
@@ -29,6 +29,8 @@ def make_store() -> StateStore:
             RolePermission(role_tag="forecast", field_path="forecast_records", access="w"),
             RolePermission(role_tag="forecast", field_path="negotiation_log", access="r"),
             RolePermission(role_tag="forecast", field_path="negotiation_log", access="w"),
+            RolePermission(role_tag="forecast", field_path="escalation_records", access="r"),
+            RolePermission(role_tag="forecast", field_path="escalation_records", access="w"),
             RolePermission(
                 role_tag="supply_coordination", field_path="allocation_candidates", access="r"
             ),
@@ -67,9 +69,10 @@ async def test_run_forecast_select_and_allocate_creates_one_allocation_candidate
         "supply_coordination",
         "COMPANY-A",
         "RAMEN",
-        get_stub_assumptions("COMPANY-A", "RAMEN"),
+        fixed_assumptions("RAMEN"),
     )
 
+    assert candidate is not None
     assert candidate.allocation == {"COMPANY-A:RAMEN": 120.0}
     assert candidate.status == "generated"
 
@@ -93,9 +96,10 @@ async def test_run_forecast_select_and_allocate_logs_selection_then_generation_i
         "supply_coordination",
         "COMPANY-A",
         "RAMEN",
-        get_stub_assumptions("COMPANY-A", "RAMEN"),
+        fixed_assumptions("RAMEN"),
     )
 
+    assert candidate is not None
     log_events = [entry.event for entry in store.get_field("forecast", "negotiation_log")]
     assert log_events == [
         "scenario_decided_chosen",
@@ -116,10 +120,11 @@ async def test_run_forecast_select_and_allocate_targets_only_matching_instance()
         "supply_coordination",
         "COMPANY-A",
         "SNACK",
-        get_stub_assumptions("COMPANY-A", "SNACK"),
+        fixed_assumptions("SNACK"),
     )
 
     # SNACK 가정 중 가장 그럴듯한 가정은 'b'(value=80) — RAMEN(value=120)과 다른 값
+    assert candidate is not None
     assert candidate.allocation == {"COMPANY-A:SNACK": 80.0}
 
     snack_record = store.get_field("forecast", "forecast_records[1]")

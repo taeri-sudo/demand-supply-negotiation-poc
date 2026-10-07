@@ -58,7 +58,7 @@ def test_same_value_but_different_data_or_methods_is_a_different_assumption():
 
 
 def test_two_drivers_sharing_the_same_evidence_are_double_counted():
-    twin = assumption("A-TWIN", [driver(), driver(name="event")])  # 같은 근거를 두 요인이 중복 사용
+    twin = assumption("A-TWIN", [driver(), driver(name="event")])  # 같은 근거를 두 원인이 중복 사용
     assert issues([twin]) == {("A-TWIN", "double_counted")}
 
 

@@ -70,6 +70,16 @@ DESIGN.md는 작업 전에 매번 읽으므로 짧게 유지한다. "진행 상�
 그 문서를 참조하게 서술한다. 값을 수정할 때는 다른 문서의 같은 항목도 grep으로 찾아
 함께 갱신했는지 확인한다.
 
+## 설계 문서 작성 규칙
+
+STATE_SCHEMA.md, AGENT_NODE_LIST.md, GRAPH_FLOW.md, MILESTONES.md를 쓰거나 고칠 때 적용한다.
+
+- 각 문서는 파일명에 맞는 내용만 쓴다. 필드 정의와 필드 수준 규칙은 STATE_SCHEMA.md, agent 역할·내부 단계·판단은 AGENT_NODE_LIST.md, agent 간 연결·신호·용어·종료조건은 GRAPH_FLOW.md, 마일스톤 범위와 검증 기준은 MILESTONES.md가 담당한다. 다른 문서가 담당하는 내용은 다시 쓰지 않고 참조만 한다.
+- STATE_SCHEMA.md, AGENT_NODE_LIST.md, GRAPH_FLOW.md는 DESIGN.md·JOURNAL.md를 참조하지 않는다. 이 세 문서만 읽어도 완결돼야 한다(MILESTONES.md는 "DESIGN.md 갱신" 항목 때문에 예외).
+- 채택한 것, 기록하기로 한 것, 미구현·미정으로 남기기로 한 것만 쓴다. 검토했지만 채택하지 않은 대안과 "처음엔 X였으나 Y로 바뀜" 같은 경위는 쓰지 않는다. 경위는 JOURNAL.md가 담당한다.
+- 용어의 상세 정의는 한 문서에만 두고 나머지는 그 문서를 참조한다. send-back·재실행 관련 용어는 GRAPH_FLOW.md에 있다.
+- 설계를 뒤집는 결정이 확정되면 그 결정을 언급하는 다른 문서도 같은 작업에서 함께 고친다.
+
 ## 용어·문체 원칙
 
 비유·관용구로 상태나 동작을 묘사하지 않는다(신체적 동작·물리적 손상·유전적 계승 등에

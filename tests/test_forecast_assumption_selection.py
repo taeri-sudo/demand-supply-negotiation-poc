@@ -2,7 +2,7 @@
 
 import pytest
 
-from sop.forecast_assumption_selection import escalation_records_for, select_forecast_assumption
+from sop.forecast_assumption_selection import select_forecast_assumption
 from sop.judgment import StructuredJudgment
 from sop.judgment_thresholds import (
     ASSUMPTION_CLEAR_LEADER_RATIO,
@@ -91,14 +91,6 @@ def test_split_boundary_is_inclusive_at_twenty_percent():
     below = select_forecast_assumption(three(121.0))
     assert at_boundary.judgment["escalate"] and scenario(at_boundary)["derivation"] == "median"
     assert not below.judgment["escalate"] and scenario(below)["derivation"] == "mean"
-
-
-def test_escalation_is_returned_as_an_intervention_record():
-    split = select_forecast_assumption([assumption("a", 100.0, 10.0), assumption("b", 125.0, 12.5)])
-    records = escalation_records_for(split)
-    assert [r.mode for r in records] == ["intervention"]
-    assert records[0].status == "pending"
-    assert escalation_records_for(select_forecast_assumption([assumption("a", 1.0)])) == []
 
 
 def test_costs_do_not_enter_the_choice():

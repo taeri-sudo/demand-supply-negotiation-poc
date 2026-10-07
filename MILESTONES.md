@@ -77,16 +77,16 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
   상황을 재현해, Lock 없이는 값이 틀리고 Lock을 걸면 정확함을 직접 입증.
 - DESIGN.md 갱신: "진행 상황"에 M0 요약 추가.
 
-### M1 — forecast(통합) → supply_coordination 최적화 배분 + 내부 되돌림 (최소 골격)
+### M1 — forecast(통합) → supply_coordination 최적화 배분 + 내부 재실행 (최소 골격)
 - `forecast`(analysis 통합, 데이터 수집→데이터 소스 판단→모델 선택→가정별 요청량
   계산→후보 선택), `supply_coordination` 두 agent만 실물 구현. 데이터
   수집·요청량 계산은 하드코딩된 candidate를 반환하는 스텁으로 대체(실물
   데이터/모델 로직은 M2에서 다룬다).
 - forecast의 후보 선택 판단은 **공통 규칙 2**에 따라 `{판단값, 근거}` pydantic
   스키마로 반환하는 규칙 기반 스텁으로 구현.
-- 되돌림(핸드오프) 로직 — `suspected_cause`가 "데이터 소스 문제"/"모델 선택
+- send-back을 받았을 때의 재실행 로직 — `suspected_cause`가 "데이터 소스 문제"/"모델 선택
   문제" 둘 중 무엇이냐에 따라 재개 지점이 갈리는지 구현(원래 별도 마일스톤
-  범위였으나, 검증agent(M3)나 supply_coordination의 역방향 되돌림(M5) 같은 외부 트리거
+  범위였으나, 검증agent(M3)나 supply_coordination의 역방향 send-back(M5) 같은 외부 트리거
   없이도 forecast agent 내부 로직만으로 독립 테스트 가능해 M1로 흡수 —
   candidate 선택의 판단3계층 분기와 같은 성격). 이력 누적이 아니라 현재값
   덮어쓰기임을 유지(`candidates`/`selected`/`validation`은 매번 갱신, 이력은
@@ -113,7 +113,7 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
 - DESIGN.md 갱신: "진행 상황"에 M1 요약 추가.
 
 ### M2 — forecast agent 실물 판단 로직 구현 (스텁 제거)
-- M1의 하드코딩 스텁을 실물 판단 로직으로 교체한다. 입력·내부 단계·되돌림은
+- M1의 하드코딩 스텁을 실물 판단 로직으로 교체한다. 입력·내부 단계·재실행은
   AGENT_NODE_LIST.md forecast agent, 필드는 STATE_SCHEMA.md `forecast_records`
   기준으로 구현한다.
 - **스키마 교체**: M1의 임시 스키마를 STATE_SCHEMA.md의 확정 스키마로 바꾼다
@@ -126,10 +126,10 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
 - 모든 판단은 규칙 기반(LLM 연동은 M7). 가정 정의도 규칙이 채운다
   (`defined_by: "rule"`).
 - 최소 구매 약정은 이미 맺은 계약 수량으로 supply_coordination의 입력이며 M4·M5에서 처리한다.
-- 되돌림: M1의 재개 지점 분기를 유지하되, 판단 함수에 되돌림 사유가
-  전달되도록 확장하고 `assumption` 사유(가정 정의부터 재실행)를 추가한다.
-- 사람 escalation의 State 반영: 계산된 가정이 하나도 없을 때(`scenario` 없음), 가정 선택 ③, 되돌림 선택지 소진을
-  `escalation_records`(`agent_id`·`reason`·`rationale`)로 남기고, 건이 열려 있는 동안 supply_coordination으로
+- 재실행: M1의 재개 지점 분기를 유지하되, 판단 함수에 send-back 이유가
+  전달되도록 확장하고 `assumption` send-back 이유(가정 정의부터 재실행)를 추가한다.
+- 사람 escalation의 State 반영: 계산된 가정이 하나도 없을 때(`scenario` 없음), 가정 선택 ③, 재실행으로 가정이 모두 제외된 경우(`options_exhausted`)를
+  `escalation_records`(`agent_id`·`reason`·`rationale`)로 남기고, 미처리 escalation 기록이 있는 동안 supply_coordination으로
   보내지 않는다(AGENT_NODE_LIST.md "사람 escalation 세 경우"). `interaction_protocol`에는 `forecast->human_manager`
   의 `selection_unresolved` 항목만 둔다. 사람 입력의 처리는 M4.
 - 가정 검증 조건은 순수 함수로 구현한다(검증agent 연결은 M3).
@@ -151,9 +151,34 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
 - 예측기법 라이브러리는 statsforecast(pandas 2.3.3 고정)를 쓴다.
 
 **검증**
-- 되돌림: 같은 스냅샷에서 `suspected_cause`가 주어지면 직전과 **다른** 결과가
-  나오는지(사유별 대응표의 각 행), 사유 없이 같은 입력이면 **같은** 결과가
-  나오는지(결정론). 선택지 소진 시 escalation으로 가는지.
+- 재실행: 같은 스냅샷에서 `suspected_cause`가 주어지면 직전과 **다른** 결과가
+  나오는지(send-back 이유별 대응표의 각 행), send-back 이유 없이 같은 입력이면 **같은** 결과가
+  나오는지(결정론).
+- 재실행, 수단 없음: 원인이 없어진 가정(`assumption`), 소스를 제외할 수 없는 `orders` 오염, 남은 기법 구성이 없는
+  `method_selection`, send-back의 대상 가정 중 재실행해도 입력이 직전 재실행과 같은 가정이 제외되고
+  `excluded_assumptions`에 send-back 이유(`{type}:{issue}`)가 제외 이유로 기록되는지. 입력이 바뀐 가정과 대상이 아닌
+  가정은 남는지.
+- 재실행, `assumption`: 대상이 `assumption_id`의 가정이고 그 가정의 원인이 모두 제외되어 `excluded_drivers`에 send-back
+  이유로 기록되는지, 다른 가정은 영향받지 않는지.
+- 재실행, 범위: 대응(보강, 소스 제외, 시점 적용, 기법 제외, 입력 불변 규칙에 따른 제외)이 대상 가정에만 적용되고
+  대상이 아닌 가정은 학습 시리즈와 입력이 바뀌지 않고 제외되지도 않는지(예: 시장 소스가 `irrelevant`일 때 시장 소스를
+  쓰지 않는 기본 가정, 시장 소스를 지정한 `insufficient`). `source`가 없는 `insufficient`와 `method_selection`이 모든
+  가정을 대상으로 하는지. 소스를 쓰는 가정이 근거로 선언했거나 학습 시리즈에 값을 낸 가정으로 판정되는지.
+- 재실행, `data_source`: `insufficient`는 대상 가정마다 독립으로 끝까지 보강하고 더 얹을 데이터가 없으면 제외하는지,
+  `contaminated`는 해당 소스가 `excluded_sources`로 제외되고 `orders` 오염이면 모든 가정이 제외되는지, `outdated`는
+  `data_sources`의 `use_from`에 기록되는지, `irrelevant`는 소스가 `excluded_sources`로 제외되는지. `orders`의
+  `irrelevant`와 `use_from` 없는 `outdated`가 오류로 거부되는지.
+- 2단계 판단 결과: `irrelevant`와 `outdated` 두 분기가 같은 이름의 `issue`로 남는지.
+- 재실행, `method_selection`: 대상이 모든 가정이고 한 번의 send-back 처리 동안 직전 기법 구성이 가정 안에서만 누적해
+  제외되는지, 다른 가정이 같은 기법을 계속 쓰는지, 남은 구성이 없으면 그 가정이 제외되는지, 누적용 State 필드가 없는지.
+- 보강 우선순위: 가정마다 독립으로, 월마다 (1) 그 가정의 원인·전제가 근거로 삼는 소스, (2) 같은 item의 다른 소스,
+  (3) 상위 단위 데이터 순서로 쓰는지(첫 실행 포함).
+- 재실행으로 기본 가정까지 제외됐을 때: send-back 전에 계산된 `scenario`가 있었으면 `options_exhausted`이고
+  `scenario`와 `assumptions`가 그 값 그대로인지, send-back 전부터 없었으면 `no_computable_assumption`이고 `scenario`가
+  `null`인지.
+- 재실행한 결과의 `validation`이 비워지는지.
+- 재실행이 무한히 돌지 않는지: send-back 한 번마다 대상 가정의 입력이 바뀌거나 그 가정이 제외되어 유한한 횟수에
+  끝나는지(반복 횟수 세기 없이).
 - 데이터 소스: 이력이 짧은 인스턴스(예: 신제품이 막 들어온 고객사·item)는
   보강 소스가 추가되고, 충분한 인스턴스는 기본 데이터만 쓰는지. 오염은
   `cleaning`에, 관련 없는 소스는 `excluded_sources`에, 구조 변화·첫 주문은
@@ -161,11 +186,11 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
 - 데이터 특성이 다른 두 인스턴스가 가정마다 고른 기법 구성(method_values의 method)이 달라지는지
   (하드코딩된 스텁과 달리 실제 입력에 반응하는지).
 - 가정: 연동 근거(시장 변화율이 우리 수요 변화율에 주는 영향의 95% 신뢰구간이 0을 포함하는지)에
-  따라 category_trend 요인을 단 가정이 남거나 제외되는지(`no_significant_effect`, `excluded_drivers`에 요인과
+  따라 category_trend 원인을 단 가정이 남거나 제외되는지(`no_significant_effect`, `excluded_drivers`에 원인과
   영향받은 가정이 기록되는지). 프로모션 이력이 없으면 `event` 전제가 모든 가정에서 빠지고 이유가 기록되는지.
   가정 정의가 가정과 근거만 선언하는지(기법별 값과 `value` 비어 있음). 가정마다 기법별 값이 가정 안에만 있고
   `value`가 하나인지, 발생 가능성이 `occurrence_likelihood`로만 표현되는지.
-- 통계기법: 요인이나 전제가 있는 가정에서는 반영할 수 있는 기법만 남고 나머지는 제외되는지, 같은 시계열이라도
+- 통계기법: 원인이나 전제가 있는 가정에서는 반영할 수 있는 기법만 남고 나머지는 제외되는지, 같은 시계열이라도
   가정마다 기법 가중치가 다른지(가정마다 따로 잰 과거 정확도), 그 가정이 성립했던 기간의 표본이 부족하면 가중치가
   균등이고 "애매함"인지, 맞는 기법이 하나도 없는 가정이 `excluded_assumptions`에 기록되는지.
 - 기본 가정: 확정 프로모션 전제를 설명변수로 받는 기법이 하나도 계산되지 않으면 기본 가정이 전제 없이 우리
@@ -185,13 +210,13 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
   기록 있는 구간으로만 계산되는지, 며칠 튄 날은 정제되고 한 달 이상 올랐다
   돌아온 구간은 `use_from`으로 잘리는지.
 - 요청량을 만들 수 없을 때: 계산된 가정이 하나도 없는 인스턴스에서 `scenario`·`selection_basis`가 `null`이고,
-  `no_computable_assumption` 건(`agent_id`, `rationale` 포함, `intervention`, `open`)이 하나만 열리며,
+  `no_computable_assumption` escalation 기록(`agent_id`, `rationale` 포함, `intervention`, `open`)이 하나만 만들어지며,
   supply_coordination으로 신호가 가지 않고 검증agent 일감이 만들어지지 않는지. 다른 인스턴스는 정상 진행하는지.
 - `scenario.value = 0`(계산된 정상 값, escalation 없음)과 `scenario = null`(escalation 있음)이 구분되는지.
 - 사용할 주문이 없는 인스턴스(주문 0건, `use_from` 후 빈 경우)가 예외 없이 위 경로로 가는지.
-- ③: 값이 많이 다르고 1등 가정도 뚜렷하지 않을 때 `selection_unresolved` 건이 열리고 `scenario`에 중간값이 있으며
-  `selection_basis`가 `"rule"`이고 보내지지 않는지. 값이 많이 달라도 1등이 뚜렷하면 건이 열리지 않는지.
-- 같은 스냅샷으로 다시 돌려도 같은 `(agent_id, reason)`의 열린 건이 중복 생성되지 않는지.
+- ③: 값이 많이 다르고 1등 가정도 뚜렷하지 않을 때 `selection_unresolved` escalation 기록이 만들어지고 `scenario`에 중간값이 있으며
+  `selection_basis`가 `"rule"`이고 보내지지 않는지. 값이 많이 달라도 1등이 뚜렷하면 escalation 기록이 만들어지지 않는지.
+- 같은 스냅샷으로 다시 돌려도 같은 `(agent_id, reason)`의 미처리 escalation 기록이 중복 생성되지 않는지.
 - `interaction_protocol`에 `forecast->human_manager`(`selection_unresolved`) 항목이 있고 나머지 두 reason에는
   항목이 없는지. 조회 키가 `(edge, escalation_trigger)`로 동작하는지.
 - 월별 합산: 마지막 불완전한 달이 제외되는지.
@@ -200,7 +225,7 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
   매핑, 프로모션 기록 없음 구간, 우리 회사 제품 범위와 상품군 매핑, 생성 수주
   데이터, INA-R 그룹 단위 사용과 우리 매출 미포함, 원가 입력 기본값과 근거)
   명시.
-  JOURNAL.md에 스키마 변경 사유 기록.
+  JOURNAL.md에 스키마 변경 이유 기록.
 
 ### M3 — 검증agent (interaction_protocol 기반 일반화, 라우팅 권한 없음)
 - 도메인 검증 agent 1개(예: `forecast_validation`)를 이벤트 트리거 워커풀로 구현.
@@ -283,8 +308,8 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
   경유로만 구현.** M3에서 만든 일반화 게이트 덕분에, 향후 이 상호작용을 열기로 결정하면
   `interaction_protocol`에 항목만 추가하면 됨(공통 규칙 1).
 - plan agent가 infeasible을 보내면 supply_coordination이 forecast로 역방향
-  되돌림을 연다(GRAPH_FLOW.md "상호작용 세 가지 유형" 참고, 핸드오프형) —
-  M1~M2에서 구현한 되돌림 메커니즘(`suspected_cause` 구조)을 그대로
+  send-back을 보낸다(GRAPH_FLOW.md "상호작용 세 가지 유형" 참고, 핸드오프형) —
+  M1~M2에서 구현한 재실행 메커니즘(`suspected_cause` 구조)을 그대로
   재사용한다. 트리거 조건만 procurement_plan 등의 infeasible 응답으로
   바뀔 뿐, `suspected_cause`(type·issue·source)만
   정해지면 된다 — 새 라운드/escalation 로직은 필요 없다. `repeat_escalation_threshold`는
@@ -296,9 +321,9 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
 - logistics_plan을 강제 infeasible 처리했을 때 사슬을 거치지 않고 hub로 바로 돌아오는지
   (hub-and-spoke가 chain이 아님을 증명).
 - 반복 infeasible로 `supply_coordination↔procurement_plan`의
-  `repeat_escalation_threshold`가 트립돼 forecast로의 핸드오프(또는 사람
+  `repeat_escalation_threshold`가 트립돼 forecast로의 send-back(또는 사람
   escalation)까지 확장되는 경로 재현 — `repeat_escalation_threshold` 자체는
-  이 라운드형 엣지에서만 계산되고, forecast로의 핸드오프는 트리거만 될 뿐
+  이 라운드형 엣지에서만 계산되고, forecast로의 send-back은 트리거만 될 뿐
   별도 카운트가 없는지 확인. M3의 헬퍼가 이 엣지에서도 재사용되는지(코드
   수정 없이 동작하는지)도 함께 확인.
 - DESIGN.md 갱신: "진행 상황"에 M5 요약, "아직 결정 안 된 것"에 "plan agent 간 직접

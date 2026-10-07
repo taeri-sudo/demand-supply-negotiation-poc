@@ -1,4 +1,4 @@
-"""category_trend 요인 확인 테스트.
+"""category_trend 원인 확인 테스트.
 
 [테스트 전용 입력] 아래 시리즈는 로직 검증을 위해 시장 변화율과 우리 수요 변화율의 관계를 직접
 정해 만든 것이다(실데이터가 아니다). `_linked_pair`는 관계가 있는 경우, `_unlinked_pair`는 없는
@@ -148,8 +148,8 @@ def test_ci_barely_excluding_zero_is_marked_ambiguous(monkeypatch):
 
 
 def test_false_driver_rate_on_unlinked_series_stays_low():
-    """관계가 없는 입력 40쌍에서 요인이 유지되는 비율. 신뢰수준 95%의 명목 비율(5%)보다 다소 높을 수
-    있어(표본이 작은 HAC, DESIGN.md "category_trend 요인과 가정별 통계기법" 한계) 상한을 느슨하게 둔다."""
+    """관계가 없는 입력 40쌍에서 원인이 유지되는 비율. 신뢰수준 95%의 명목 비율(5%)보다 다소 높을 수
+    있어(표본이 작은 HAC, DESIGN.md "category_trend 원인과 가정별 통계기법" 한계) 상한을 느슨하게 둔다."""
     false_positives = 0
     for seed in range(40):
         market, demand = _unlinked_pair(seed)

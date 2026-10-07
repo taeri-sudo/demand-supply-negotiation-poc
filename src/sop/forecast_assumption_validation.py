@@ -6,7 +6,7 @@ STATE_SCHEMA.md의 가정 검증 조건을 구현한다. 검증agent 연결은 M
 - `no_evidence`: 가정의 driver가 가리키는 근거 `(kind, item_scope)`가 이번 주기 스냅샷의 `data_sources`에 있는가
 - `value_out_of_range`: 가정의 `value`가 과거 월별 요청량의 [최소, 최대]에서 범위 폭의
   `ASSUMPTION_VALUE_RANGE_MARGIN`배를 넘게 벗어나지 않는가
-- `not_distinct`: 같은 구성의 가정이 둘 이상이 아닌가. 구성은 driver(요인, 근거)와 통계기법 집합이다.
+- `not_distinct`: 같은 구성의 가정이 둘 이상이 아닌가. 구성은 driver(원인, 근거)와 통계기법 집합이다.
   **요청량이 같아도 데이터나 기법이 다르면 다른 가정**이라 value는 비교하지 않는다
 - `double_counted`: 한 가정 안의 두 driver가 같은 근거를 중복 사용하지 않는가(예: 가격 인하가 포함된
   프로모션을 `price`와 `event`로 이중 계산)
@@ -32,7 +32,7 @@ def _signature(assumption: Assumption) -> tuple:
 def validate_assumptions(
     assumptions: list[Assumption], data_sources: list[DataSource], history: list[float]
 ) -> list[SuspectedCause]:
-    """위반한 가정마다 되돌림 사유를 반환한다. 위반이 없으면 빈 목록이다."""
+    """위반한 가정마다 send-back 이유를 반환한다. 위반이 없으면 빈 목록이다."""
     causes: list[SuspectedCause] = []
     available = {(s.kind, s.item_scope) for s in data_sources}
     low, high = (min(history), max(history)) if history else (None, None)

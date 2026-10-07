@@ -190,7 +190,7 @@ def test_exactly_six_months_is_enough_to_evaluate():
     assert result.judgment["holdout_months"] == 6 and result.judgment["weights"] == "walk_forward"
 
 
-# --- 되돌림: 직전 기법 제외 -----------------------------------------------------------------------
+# --- 재실행: 직전 기법 제외 -----------------------------------------------------------------------
 
 
 def test_excluding_a_previous_method_removes_it_from_the_candidates():

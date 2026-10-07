@@ -1,6 +1,6 @@
-"""category_trend 요인 확인 — 시장 변화율이 우리 수요 변화율에 주는 영향이 통계적으로 있는지 판단한다.
+"""category_trend 원인 확인 — 시장 변화율이 우리 수요 변화율에 주는 영향이 통계적으로 있는지 판단한다.
 
-AGENT_NODE_LIST.md forecast agent "통계기법 선택"의 첫 판단(요인 확인)에서 쓴다
+AGENT_NODE_LIST.md forecast agent "통계기법 선택"의 첫 판단(원인 확인)에서 쓴다
 (`forecast_driver_check.py`). 효과의 크기는 여기서 정하지 않는다 — 시장 변화율은 회귀 기법의
 설명변수로 들어가고(`driver_regressors.py`), 요청량은 기법이 계산한다.
 
@@ -11,7 +11,7 @@ AGENT_NODE_LIST.md forecast agent "통계기법 선택"의 첫 판단(요인 확
   공표 시차 때문에 t-2이고 예측 대상은 t+1이므로 3개월이다. 추정 결과를 보고 고르지 않는다.
 - **추정**: 우리 수요 변화율을 시장 변화율로 설명하는 단순 회귀. 표준오차는 Newey-West(HAC)이고
   신뢰구간은 95%다.
-- **판단**: 신뢰구간이 0을 포함하면 유의한 효과 없음(`no_significant_effect`)으로 이 요인을 단 가정을 만들지 않고, 포함하지 않으면 요인을 유지한다(`significant_effect`).
+- **판단**: 신뢰구간이 0을 포함하면 유의한 효과 없음(`no_significant_effect`)으로 이 원인을 단 가정을 만들지 않고, 포함하지 않으면 원인을 유지한다(`significant_effect`).
   0과 가까스로 걸치면(`TREND_ZERO_EDGE_FRACTION`) `ambiguous`로 표시한다.
 
 반환은 다른 판단과 같은 `StructuredJudgment`({판단값, 근거})이며 LLM 판단(M7)이 같은 스키마로
@@ -74,14 +74,14 @@ def _no_evidence(reason: str, **values: object) -> StructuredJudgment:
     """데이터가 모자라 추정 자체를 못 한 경우."""
     return StructuredJudgment(
         judgment={"decision": "no_evidence", "lag_months": TREND_LAG_MONTHS, **values},
-        reasoning=f"category_trend 요인 근거 없음: {reason}",
+        reasoning=f"category_trend 원인 근거 없음: {reason}",
     )
 
 
 def estimate_category_trend(
     demand_monthly: pd.Series, market_index: pd.DataFrame | pd.Series, planning_month: pd.Timestamp
 ) -> StructuredJudgment:
-    """우리 수요(월별 POS)와 시장 지수(물가 보정 후, 그룹별)로 category_trend 요인을 판단한다.
+    """우리 수요(월별 POS)와 시장 지수(물가 보정 후, 그룹별)로 category_trend 원인을 판단한다.
 
     `planning_month`는 마지막으로 끝난 달 t이다(예측 대상은 t+1). 시장은 공표된 달(t-2)까지만 쓴다.
     """
@@ -134,7 +134,7 @@ def estimate_category_trend(
         log(ROLE_TAG, "estimate_category_trend", decision="no_significant_effect", n=fit.n, ambiguous=near_zero)
         return StructuredJudgment(
             judgment={"decision": "no_significant_effect", **basis},
-            reasoning=f"category_trend 요인 없음: {summary} — 신뢰구간이 0을 포함해 유의한 효과가 없음",
+            reasoning=f"category_trend 원인 없음: {summary} — 신뢰구간이 0을 포함해 유의한 효과가 없음",
             ambiguous=near_zero,
             ambiguity_reason=edge_reason,
         )

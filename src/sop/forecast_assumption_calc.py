@@ -83,14 +83,18 @@ def _calculate_one(
     inputs: InstanceInputs,
     collection: DataCollectionResult,
     planning_month: pd.Timestamp,
+    exclude: set[str] | None = None,
 ) -> tuple[Assumption | None, list[StructuredJudgment], str]:
-    """가정 하나의 기법을 고르고 값을 계산한다. 맞는 기법이 없으면 (None, 판단, 이유)를 반환한다."""
-    training = collection.training_series
+    """가정 하나의 기법을 고르고 값을 계산한다. 맞는 기법이 없으면 (None, 판단, 이유)를 반환한다.
+
+    `exclude`는 send-back 재실행이 이 가정에서 제외한 기법이다.
+    """
+    training = collection.training_for(assumption.assumption_id)
     market = collection.evidence_series.get(("market", "category"))
     regressors = build_regressors(
         assumption.drivers, premises, inputs.orders, market, pd.DatetimeIndex(training.index), planning_month
     )
-    selection = select_methods(training, collection.n_observed_months, regressors)
+    selection = select_methods(training, collection.n_observed_months, regressors, exclude)
     judgments = [_tag(selection, assumption.assumption_id)]
     y = training.to_numpy(dtype=float)
     computed: list[tuple[str, float, float, float | None]] = []  # (기법, 값, 가중치, MAE)
@@ -102,7 +106,7 @@ def _calculate_one(
                 regressors.matrix if regressors is not None else None,
                 regressors.x_future if regressors is not None else None,
             )
-        except Exception:  # 계산할 수 없는 기법은 이 가정에서 뺀다
+        except Exception:  # 계산할 수 없는 기법은 이 가정에서 제외한다
             continue
         computed.append((chosen["method"], max(value, 0.0), chosen["method_weight"], chosen["mae"]))
     if not computed:
@@ -132,24 +136,32 @@ def select_methods_and_calculate_values(
     inputs: InstanceInputs,
     collection: DataCollectionResult,
     planning_month: pd.Timestamp,
+    method_exclusions: dict[str, set[str]] | None = None,
 ) -> CalculatedAssumptions:
     """가정마다 통계기법을 고르고 기법별 값과 가정의 value·forecast_uncertainty를 채운다.
 
     기본 가정(`drivers`가 비어 있음)은 확정 프로모션 전제 유무와 상관없이 항상 후보에 남는다. 전제를 설명변수로
     받는 기법이 하나도 계산되지 않으면 전제를 반영하지 않고 우리 주문 이력만으로(시계열 기법 포함) 계산하고,
-    전제를 반영하지 못했다는 사실과 이유를 `ExcludedDriver`로 남기며 "애매함"으로 표시한다. 요인이 있는 가정은
-    맞는 기법이 없으면 제외한다. 이력이 짧아 전제 없이도 어떤 기법도 계산되지 않는 기본 가정만 제외된다.
+    전제를 반영하지 못했다는 사실과 이유를 `ExcludedDriver`로 남기며 "애매함"으로 표시한다. 원인이 있는 가정은
+    맞는 기법이 없으면 제외한다. 이력이 짧아 전제 없이도 어떤 기법도 계산되지 않는 기본 가정만 제외된다. 사용할 주문이
+    없어 계산할 수 없는 수집 결과면 계산하지 않고 빈 결과를 돌려준다(이유는 `collection.unusable_reason`).
+    `method_exclusions`는 send-back 재실행이 가정마다 제외한 기법이다(가정 ID별, 그 가정 안에서만 적용한다).
     """
+    method_exclusions = method_exclusions or {}
+    if collection.unusable_reason is not None:
+        log(ROLE_TAG, "select_methods_and_calculate_values", calculated=[], unusable=collection.unusable_reason)
+        return CalculatedAssumptions(assumptions=[])
     calculated: list[Assumption] = []
     excluded: list[ExcludedAssumption] = []
     excluded_drivers: list[ExcludedDriver] = []
     judgments: list[StructuredJudgment] = []
 
     for assumption in assumptions:
-        result, found, reason = _calculate_one(assumption, premises, inputs, collection, planning_month)
+        exclude = method_exclusions.get(assumption.assumption_id)
+        result, found, reason = _calculate_one(assumption, premises, inputs, collection, planning_month, exclude)
         judgments.extend(found)
         if result is None and premises and not assumption.drivers:
-            result, retried, retry_reason = _calculate_one(assumption, [], inputs, collection, planning_month)
+            result, retried, retry_reason = _calculate_one(assumption, [], inputs, collection, planning_month, exclude)
             judgments.extend(retried)
             if result is not None:
                 note = f"확정 프로모션 전제를 설명변수로 받는 기법이 하나도 계산되지 않아 전제를 반영하지 못함: {reason}"

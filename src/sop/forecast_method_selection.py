@@ -17,7 +17,7 @@
    두며 "애매함"으로 표시한다. 상위 두 기법의 MAE 상대차가 `METHOD_AMBIGUITY_REL_DIFF` 이하여도
    "애매함"이다.
 
-되돌림으로 재실행될 때는 `exclude`에 직전 기법을 넘겨 제외한 채 다시 고른다. 반환은 공통
+send-back으로 재실행될 때는 `exclude`에 직전 기법을 넘겨 제외한 채 다시 고른다. 반환은 공통
 `StructuredJudgment`다(공통 규칙 2).
 """
 

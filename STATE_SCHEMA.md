@@ -11,11 +11,11 @@ agent 간 연결·신호·동시성은 GRAPH_FLOW.md 참고.
 forecast agent((회사,item) 인스턴스별 1개, 총 N개, role_tag: forecast) — 지속 태스크
    (가정 정의→데이터 수집·소스 판단→통계기법 선택→가정별 요청량 예측값 계산→
     가정 선택을 한 agent 내부 단계로 수행)
-        ↕  (신호 기반, 평소 정방향 최적화 / 예외 시에만 역방향 핸드오프)
+        ↕  (신호 기반, 평소 정방향 최적화 / 예외 시에만 역방향 send-back)
 supply_coordination agent(1개, role_tag: supply_coordination) — 지속 태스크
    ↕procurement_plan   ↕production_plan   ↕logistics_plan  (각 1개, 지속 태스크)
    (hub-and-spoke — 셋 다 직접 연결, 사슬 아님. 순서는 의존관계에 따른
-    호출 순서일 뿐, 건너뛰기/역방향 되돌림 모두 구조적으로 가능)
+    호출 순서일 뿐, 건너뛰기/역방향 send-back 모두 구조적으로 가능)
         ↓
 실제 조달/생산/배송 (그래프 노드 아님, 외부 경계 — sales_channel과 같은 성격)
 
@@ -25,7 +25,7 @@ validation agent(들) — 일감은 이벤트 트리거·무기억 워커풀 방
 지속 태스크 아님.
 
 문제 발생 시: 공급망계획agent → supply_coordination → (필요시) forecast/
-채널/사람 escalation — 어디까지 되돌릴지는 interaction_protocol이
+채널/사람 escalation — 어디까지 send-back 또는 escalation할지는 interaction_protocol이
 규정.
 ```
 
@@ -44,7 +44,7 @@ forecast agent 인스턴스((회사, item) 조합별 1개)가 State에 남기는
     { assumption_id,
       drivers: [                                            # 가정마다 다름. 비어 있으면 기본 가정(현재 추세 유지)
         { driver: "category_trend" | "price" | "event",     # 요청량을 바꾸는 원인(수요 동인)
-          evidence: { kind, item_scope, refs } }            # 이 요인의 근거 — data_sources 풀에서 쓰는 데이터
+          evidence: { kind, item_scope, refs } }            # 이 원인의 근거 — data_sources 풀에서 쓰는 데이터
       ],
       defined_by: "rule" | "agent_judgment",
       method_values: [                                      # 이 가정이 고른 통계기법별 요청량
@@ -55,10 +55,10 @@ forecast agent 인스턴스((회사, item) 조합별 1개)가 State에 남기는
   ],
   premises: [ { driver: "event", evidence } ],              # 모든 가정의 전제(확정된 프로모션 일정). 가정의 요소가 아님
   excluded_drivers: [
-    { driver, assumption_ids, reason, rationale }           # 근거 부족·효과 없음·반영 불가로 뺀 요인과 영향받은 가정
-  ],                                                        # reason: "no_significant_effect" | "no_evidence" | "no_applicable_method"
+    { driver, assumption_ids, reason, rationale }           # 근거 부족·효과 없음·반영 불가·send-back으로 제외한 원인과 영향받은 가정
+  ],                                                        # reason: "no_significant_effect" | "no_evidence" | "no_applicable_method" | send-back 이유
   excluded_assumptions: [
-    { assumption_id, reason: "no_applicable_method",        # 맞는 통계기법이 하나도 없어 제외한 가정
+    { assumption_id, reason: "no_applicable_method" | send-back 이유,  # 맞는 통계기법이 없거나 send-back 이유로 제외한 가정
       rationale }
   ],
   data_sources: [
@@ -68,7 +68,7 @@ forecast agent 인스턴스((회사, item) 조합별 1개)가 State에 남기는
       use_from: date | null }                               # 이 날짜 이전 데이터는 쓰지 않음
   ],
   excluded_sources: [
-    { kind, item_scope, refs, reason: "irrelevant" }        # 관련 없는 데이터 — 재실행 시 다시 고르지 않음
+    { kind, item_scope, refs, reason: "irrelevant" | "contaminated" }  # 쓰지 않는 데이터(관련 없음 또는 오염) — 재실행 시 다시 고르지 않음
   ],
   cleaning: { applied, count },                             # 표준 정제 적용 기록
   scenario: { value, assumption_ids, derivation } | null,   # 가정들 중에서 택하거나 계산해 정한 최종 요청량과 출처 가정
@@ -81,10 +81,10 @@ forecast agent 인스턴스((회사, item) 조합별 1개)가 State에 남기는
 
 suspected_cause: {
   type:   "assumption" | "data_source" | "method_selection",
-  issue:  (type별 하위 사유 — 아래 참고) | null,
-  assumption_id: ... | null,                                  # type이 assumption일 때 문제가 난 가정
+  issue:  (문제 대상별 문제 내용 — 아래 참고) | null,
+  assumption_id: ... | null,                                  # type이 assumption일 때 대상 가정(필수). 다른 type에는 없다
   source: { kind, item_scope } | null,                       # type이 data_source일 때 문제가 난 소스
-  use_from: date | null                                      # 시점 기준으로 무관할 때
+  use_from: date | null                                      # outdated일 때, 이 날짜 이전 데이터는 쓰지 않음
 }
 ```
 
@@ -104,7 +104,7 @@ suspected_cause: {
 
 **용어 — 이 문서가 정의하고 다른 문서는 참조한다.**
 - **driver**(수요 동인): 요청량을 바꾸는 원인 하나. 프로모션(`event`), 시장 추세(`category_trend`) 등.
-  근거 데이터가 실제로 있는 것만 목록에 두고 새 요인이 필요해지면 값을 추가한다. 자유 텍스트로 두면
+  근거 데이터가 실제로 있는 것만 목록에 두고 새 원인이 필요해지면 값을 추가한다. 자유 텍스트로 두면
   근거를 검증할 수 없다. `price`(매장 판매가 변화)는 확장 영역이다 — 매장 판매가 데이터가 없고 고객사 단독
   가격 조정은 미리 알 수 없어 `price`는 매장 판매가 데이터가 생길 때 쓴다. 협의된 가격 인하는 프로모션이라
   `event`로 들어간다. 최소 구매 약정은 이미 맺은 계약 수량으로 supply_coordination의 입력이다
@@ -126,23 +126,29 @@ suspected_cause: {
   채우는 규칙이 없어 null이다). 발생 가능성은 가정의 `occurrence_likelihood`로만 둔다.
 - `value`는 가정 하나의 요청량 예측값이고, 가정 안에서 기법별 값을 합치거나 하나 선택해 정한다.
 - `defined_by`는 가정을 규칙이 만들었는지(`"rule"`) agent 판단이 만들었는지(`"agent_judgment"`)를 기록한다.
-- 가정 정의 직후에는 `method_values`와 `value`, `forecast_uncertainty`가 비어 있고(가정 정의는 요인과
+- 가정 정의 직후에는 `method_values`와 `value`, `forecast_uncertainty`가 비어 있고(가정 정의는 원인과
   근거를 선언만 한다) 통계기법 선택과 가정별 요청량 예측값 계산이 채운다. 값이 비어 있는 가정은 가정
   선택의 대상이 아니다.
 - 확정된 프로모션 일정은 가정의 요소가 아니라 **모든 가정의 전제**(`premises`)다.
-- 제외 기록: 가정에서 뺀 요인은 `excluded_drivers`에 요인, 영향받은 가정, 이유(`reason`)를 남기고,
-  계산할 수 없어 제외한 가정은 `excluded_assumptions`에 이유를 남긴다. `excluded_drivers.reason`은
-  `no_significant_effect`(신뢰구간이 0을 포함), `no_evidence`(forecast가 근거 데이터를 수집하지 못했거나
-  기록이 모자람), `no_applicable_method`(전제를 설명변수로 받는 기법이 계산되지 않음) 중 하나다. 되돌림
-  사유(`suspected_cause.issue`)의 `no_evidence`는 검증agent가 가정의 근거가 이번 주기 스냅샷의
-  `data_sources`에 없다고 알리는 값이며, 두 `no_evidence`는 쓰이는 필드로 구분한다
-  (`excluded_drivers.reason`과 `suspected_cause.issue`).
+- 제외 기록: 가정에서 제외한 원인은 `excluded_drivers`에 원인, 영향받은 가정, 제외 이유(`reason`)를 남기고,
+  계산할 수 없어 제외한 가정은 `excluded_assumptions`에 제외 이유(`reason`)를 남긴다. send-back으로 제외한 원인과
+  가정은 `reason`에 send-back 이유(`suspected_cause`의 문제 대상·문제 내용)를 `{type}:{issue}` 형식으로 적고,
+  문제 내용이 없으면 `{type}`으로 적는다(예: `assumption:value_out_of_range`, `data_source:outdated`,
+  `method_selection`). `excluded_drivers.reason`은 `no_significant_effect`(신뢰구간이 0을 포함),
+  `no_evidence`(forecast가 근거 데이터를 수집하지 못했거나 기록이 모자람), `no_applicable_method`(전제를
+  설명변수로 받는 기법이 계산되지 않음) 중 하나이거나 send-back 이유다. `excluded_assumptions.reason`은
+  `no_applicable_method`이거나 send-back 이유다. send-back 이유의 문제 내용(`suspected_cause.issue`)
+  `no_evidence`는 검증agent가 가정의 근거가 이번 주기 스냅샷의 `data_sources`에 없다고 알리는 값이며, 두
+  `no_evidence`는 쓰이는 필드로 구분한다(`excluded_drivers.reason`과 `suspected_cause.issue`).
 - **요청량을 만들 수 없을 때**: 계산된 가정이 하나도 없으면(기본 가정까지 계산되지 않았거나, 사용할 수 있는
-  주문 이력이 없음) `scenario`와 `selection_basis`는 `null`이다. 요청량 0은 정상 값(`scenario.value = 0`)이고
+  주문 이력이 없거나, send-back 전부터 `scenario`가 없었음) `scenario`와 `selection_basis`는 `null`이다.
+  send-back 전에 계산된 `scenario`가 있었는데 재실행으로 가정이 모두 제외되면 `scenario`(1개)와 `assumptions`(그
+  `scenario`를 만든 가정 목록)를 send-back 전 값 그대로 두고 `reason`은 `options_exhausted`다. 그 가정들은
+  `excluded_assumptions`에도 있을 수 있다. 요청량 0은 정상 값(`scenario.value = 0`)이고
   `null`은 값이 없다는 뜻이라 서로 다르다. 이때 `escalation_records`에 `reason: "no_computable_assumption"`
-  건이 열린다(7번 절). 이후 forecast agent의 동작은 AGENT_NODE_LIST.md "사람 escalation 세 경우"를 따른다.
+  escalation 기록이 만들어진다(7번 절). 이후 forecast agent의 동작은 AGENT_NODE_LIST.md "사람 escalation 세 경우"를 따른다.
 - 가정 검증 조건(검증agent가 확인하는 독립 제약조건)은 AGENT_NODE_LIST.md 검증agent 절에 있고, 어긴 경우의
-  사유 값은 아래 `suspected_cause` 표에 있다.
+  문제 내용 값은 아래 `suspected_cause` 표에 있다.
 
 **데이터 소스 — `kind`와 `item_scope`는 성격이 다른 두 변수다.**
 
@@ -162,21 +168,29 @@ suspected_cause: {
 제품. 현재 데이터로 채울 수 있는 조합은 AGENT_NODE_LIST.md forecast agent
 "입력" 참고.
 
-**되돌림 사유(`suspected_cause`)** — `type`은 문제가 난 대상, `issue`는
-그 대상의 하위 사유:
+**send-back 이유(`suspected_cause`)** — `type`은 문제 대상, `issue`는
+그 대상의 문제 내용:
 
-| type | issue |
+| 문제 대상(`type`) | 문제 내용(`issue`) |
 |---|---|
-| `assumption` | `no_evidence`(근거가 스냅샷에 없음) / `value_out_of_range`(가정의 value가 과거 월별 요청량 범위를 벗어남) / `not_distinct`(같은 구성의 가정이 둘 이상) / `double_counted`(한 가정 안 요인 간 근거 중복) — 위 가정 검증 조건과 1:1 대응 |
-| `data_source` | `insufficient`(부족) / `contaminated`(오염) / `irrelevant`(무관 — `use_from`이 있으면 시점 기준, 없으면 관련 없는 소스) |
+| `assumption` | `no_evidence`(근거가 스냅샷에 없음) / `value_out_of_range`(가정의 value가 과거 월별 요청량 범위를 벗어남) / `not_distinct`(같은 구성의 가정이 둘 이상) / `double_counted`(한 가정 안 원인 간 근거 중복) — 위 가정 검증 조건과 1:1 대응 |
+| `data_source` | `insufficient`(부족) / `contaminated`(오염) / `irrelevant`(소스 자체가 무관) / `outdated`(시점 기준으로 무관 — `use_from` 필수) |
 | `method_selection` | 없음(가정마다 고른 통계기법 구성이 문제) |
 
-사유별 재개 지점과 대응은 AGENT_NODE_LIST.md forecast agent "되돌림" 참고.
-검증agent의 `flagged`와 supply_coordination→forecast 역방향 되돌림은 같은
+대상 필드는 문제 대상(`type`)별로 정해져 있다. `assumption`에는 `assumption_id`가 필수이고 다른 문제 대상에는
+`assumption_id`가 없다. `data_source`는 `insufficient` 이외의 문제 내용에 `source`가 필요하다. `use_from`은
+`outdated`에 필수이고 다른 문제 내용에는 없다. `orders`는 항상 쓰므로 소스를 제외할 수 없어 `orders`는
+`outdated`만 받고, `orders`의 `irrelevant`는 허용되지 않는 판정이다. `method_selection`은 문제 내용과 대상 필드가
+없다. 이 필드로 정해지는 대상 가정과 재실행의 범위는 AGENT_NODE_LIST.md forecast agent "재실행"에 있다.
+
+send-back 이유별 재개 지점과 대응은 AGENT_NODE_LIST.md forecast agent "재실행" 참고. send-back·재실행 용어는
+GRAPH_FLOW.md "send-back·재실행 관련 용어" 참고.
+검증agent의 `flagged`와 supply_coordination→forecast 역방향 send-back은 같은
 형식으로 보낸다.
 
 `validation`은 **현재값만** 유지(이력 전체는 `negotiation_log`에 쌓임 —
-판단용 현재값과 기록용 스냅샷 분리).
+판단용 현재값과 기록용 스냅샷 분리). send-back을 받아 재실행한 결과는 아직 검증받지 않았으므로 `validation`을
+비운다.
 
 ### 2. `capacity_pools[]`
 생산capacity를 "계좌"처럼 관리. 공유풀/전용풀 둘 다 표현 가능.
@@ -236,7 +250,7 @@ production_plan/logistics_plan)와의 집행 교환 내역을 내장한다 — �
     { role_tag: "procurement_plan", round: 1, request: {...},
       response: {...}, response_status: "feasible" | "infeasible" | "in_progress",
       requested_at, responded_at, handled_by,  # 워커풀이면 누가 처리했는지(선택)
-      routing_reason,  # infeasible일 때 supply_coordination이 어디로/왜 되돌렸는지
+      routing_reason,  # infeasible일 때 supply_coordination이 어디로/왜 send-back했는지
       validation: { status: "passed" | "flagged" | "check_failed", suspected_cause, rationale, ts, validator_role_tag } },
     { role_tag: "production_plan", round: 1, ... }
   ]
@@ -275,11 +289,12 @@ priority_queue_entry = { agent_id, wait_start_ts, revenue_impact,
 ```
 
 ### 5. `interaction_protocol[]`
+이 표는 코드가 조회하는 엣지별 기준값(max_rounds, repeat_escalation_threshold, 알림 기준, 처리 모드 등)을 담는다. 트레이싱·상호작용 기록이나 외부 벤치마크로 조정할 값이 있는 엣지만 두고, 값이 고정인 경우는 두지 않는다. 엣지의 흐름은 GRAPH_FLOW.md에 있다.
 agent 역할 간 상호작용 규칙(동역학). `scope`는 인스턴스 나열이 아니라 역할
 태그.
 ```
 { edge: "supply_coordination<->procurement_plan", max_rounds: 3,  # 타임아웃 안전장치
-  repeat_escalation_threshold: 2,  # 같은 사유(routing_reason 등)가 이 횟수만큼
+  repeat_escalation_threshold: 2,  # 같은 이유(routing_reason 등)가 이 횟수만큼
                                     # 연속 반복되면 max_rounds 소진을 안 기다리고
                                     # "구조적으로 안 풀림"으로 간주해 상위로 확장
   scope: ["supply_coordination", "procurement_plan"],
@@ -291,8 +306,8 @@ agent 역할 간 상호작용 규칙(동역학). `scope`는 인스턴스 나열�
 ```
 
 **forecast<->supply_coordination는 방향에 따라 성격이 다르지만**(정방향은
-단방향 전달=최적화, 역방향은 공급망계획agent의 infeasible 신호로 여는
-핸드오프=재실행 지시 — GRAPH_FLOW.md 엣지 표 참고), **두 방향 모두
+단방향 전달=최적화, 역방향은 공급망계획agent의 infeasible 신호로 supply_coordination이
+forecast에 send-back을 보내는 핸드오프형 — GRAPH_FLOW.md 엣지 표 참고), **두 방향 모두
 라운드가 쌓이지 않아 `max_rounds`가 필요 없다** — 그래서 정방향/역방향을
 나누지 않고 레코드 하나를 함께 쓴다:
 ```
@@ -300,9 +315,9 @@ agent 역할 간 상호작용 규칙(동역학). `scope`는 인스턴스 나열�
   scope: ["forecast", "supply_coordination"],
   escalation_trigger, escalation_target, escalation_kind,
   source: "initial_design", last_updated }
-  # max_rounds 없음: 정방향(최적화)·역방향(핸드오프) 모두 라운드 개념이
+  # max_rounds 없음: 정방향(최적화)·역방향(핸드오프형) 모두 라운드 개념이
   # 없다. repeat_escalation_threshold/escalation_*는 검증agent의 flagged
-  # 되돌림 경로(GRAPH_FLOW.md "검증agent" 참고)가 두 방향 모두에 동일하게
+  # send-back 경로(GRAPH_FLOW.md "검증agent" 참고)가 두 방향 모두에 동일하게
   # 적용되므로 유지한다
 ```
 다른 엣지(supply_coordination↔procurement_plan 등)는 요청→응답→
@@ -328,7 +343,7 @@ AGENT_NODE_LIST.md supply_coordination agent 참고)는 plan agent와의 협상�
 **forecast → human_manager**는 가정 선택 ③에만 항목이 있다. ③은 가정들의 값이 서로 많이 다르고, 과거
 정확도로 매긴 점수에서도 1등 가정이 2등을 뚜렷하게 앞서지 못해 어느 가정을 믿을지 정할 수 없을 때 사람을
 부르는 경우다(판단 기준은 AGENT_NODE_LIST.md forecast 5단계). 사람이 필요한지(모드)를 트레이싱·처리 결과를
-보고 조정할 대상이기 때문에 항목을 둔다. 요청량을 만들 수 없을 때와 되돌림 선택지가 소진됐을 때는 조정할 값이
+보고 조정할 대상이기 때문에 항목을 둔다. 요청량을 만들 수 없을 때와 재실행으로 가정이 모두 제외됐을 때는 조정할 값이
 없고 항상 `intervention`이라 항목을 두지 않는다. 같은 엣지에 트리거가 여러 개일 수 있어 조회 키는
 `(edge, escalation_trigger)`다. ③의 수치 기준은 지금 코드의 `judgment_thresholds.py`에 있다.
 ```
@@ -362,19 +377,19 @@ State 필드 단위 접근권한(agent 간, Unity Catalog의 시스템 접근통
 라인 자원이므로)만 접근한다.
 
 ### 7. `escalation_records[]`
-사람(human_manager)에게 올라간 건의 기록. `mode`로 종류를 구분한다 —
-`intervention`은 진행을 멈추고 사람의 결정을 기다리는 건, `notice`는 알리기만
-하고 진행하는 건(사람의 결정이 없으므로 `resolution`이 없음).
+사람(human_manager)에게 올라간 escalation 기록. `mode`로 종류를 구분한다 —
+`intervention`은 진행을 멈추고 사람의 결정을 기다리는 escalation 기록, `notice`는 알리기만
+하고 진행하는 escalation 기록(사람의 결정이 없으므로 `resolution`이 없음).
 ```
-{ agent_id | null,                       # 건이 발생한 인스턴스("{company_id}:{item_id}"). 인스턴스와 무관한 엣지는 null
-  trigger_edge, reason, rationale,       # rationale: 사람이 읽는 사유 설명
+{ agent_id | null,                       # escalation 기록이 발생한 인스턴스("{company_id}:{item_id}"). 인스턴스와 무관한 엣지는 null
+  trigger_edge, reason, rationale,       # rationale: 사람이 읽는 이유 설명
   target_role: "human_manager",
   mode: "intervention" | "notice",
   status, resolution }   # resolution은 intervention일 때만
 ```
 `reason`은 엣지마다 값 목록이 다르다. `forecast->human_manager`의 값은 세 가지다: `no_computable_assumption`(계산된
-가정이 하나도 없어 요청량을 만들 수 없음), `selection_unresolved`(가정 선택 ③), `options_exhausted`(되돌림에
-대응할 선택지가 소진됨). 세 경우 모두 `mode`는 `intervention`이고 `status`는 `"open"`으로 시작한다.
+가정이 하나도 없어 요청량을 만들 수 없음), `selection_unresolved`(가정 선택 ③), `options_exhausted`(send-back 전에
+계산된 `scenario`가 있었는데 재실행으로 가정이 모두 제외됨. `scenario`와 `assumptions`는 send-back 전 값을 그대로 둠). 세 경우 모두 `mode`는 `intervention`이고 `status`는 `"open"`으로 시작한다.
 
 ## State 접근 규칙
 

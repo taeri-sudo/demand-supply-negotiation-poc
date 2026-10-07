@@ -1,4 +1,4 @@
-"""가정 정의 → 데이터 수집 → 요인 확인 → 통계기법 선택·가정별 요청량 예측값 계산 테스트.
+"""가정 정의 → 데이터 수집 → 원인 확인 → 통계기법 선택·가정별 요청량 예측값 계산 테스트.
 
 [테스트 전용 입력] 시장 지수와 POS 수준은 로직 검증을 위해 시장 변화율과 우리 수요 변화율의 관계를
 직접 정해 만든 것이다(실데이터가 아니다). `linked_market_and_pos`는 연동 근거가 있는 경우,
@@ -84,7 +84,7 @@ def make_inputs(beta, seed, with_market=True, promo=False):
 
 
 def run_pipeline(inputs, scheduled_promotion=False):
-    """가정 정의(맨 앞) → 데이터 수집 → 요인 확인 → 통계기법 선택과 가정별 요청량 예측값 계산."""
+    """가정 정의(맨 앞) → 데이터 수집 → 원인 확인 → 통계기법 선택과 가정별 요청량 예측값 계산."""
     definition = define_assumptions(inputs, scheduled_promotion)
     collection = collect_instance_data(inputs, definition.required_evidence)
     planning = last_complete_month(inputs.data_end)
@@ -164,7 +164,7 @@ def test_definition_respects_the_limits(monkeypatch):
         define_assumptions(inputs)
 
 
-# --- 요인 확인: 연동 근거에 따라 category_trend 요인을 단 가정이 남거나 제외된다 -----------------
+# --- 원인 확인: 연동 근거에 따라 category_trend 원인을 단 가정이 남거나 제외된다 -----------------
 
 
 def test_linked_evidence_keeps_the_category_trend_assumption():
@@ -359,7 +359,7 @@ def test_default_assumption_falls_back_to_the_order_history_when_no_method_can_r
     marks = [j for j in calculated.judgments if j.judgment.get("decision") == "premise_not_reflected"]
     assert len(marks) == 1 and marks[0].ambiguous and marks[0].ambiguity_reason
     assert marks[0].judgment["assumption_id"] == DEFAULT_ID
-    assert ids(calculated.assumptions) == [DEFAULT_ID]  # 요인이 있는 가정은 맞는 기법이 없으면 제외
+    assert ids(calculated.assumptions) == [DEFAULT_ID]  # 원인이 있는 가정은 맞는 기법이 없으면 제외
     assert [e.assumption_id for e in calculated.excluded_assumptions] == [TREND_ID]
     stored = ForecastRecord(
         agent_id="CUST-01:ITEM-1", company_id="CUST-01", item_id="ITEM-1",

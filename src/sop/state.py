@@ -21,14 +21,14 @@ AccessMode = Literal["r", "w"]
 # 데이터 소스 — kind(출처)와 item_scope(예측 대상 item과의 관계)는 독립된 두 변수
 DataKind = Literal["orders", "pos", "market"]
 ItemScope = Literal["same_item", "similar_item", "category"]
-# 수요 동인 — 데이터가 실제로 존재하는 요인만 값으로 둔다(자유 텍스트 금지)
+# 수요 동인 — 데이터가 실제로 존재하는 원인만 값으로 둔다(자유 텍스트 금지)
 DriverName = Literal["category_trend", "price", "event"]
 AssumptionDefinedBy = Literal["rule", "agent_judgment"]
 
-# 되돌림 사유 — type은 문제가 난 대상, issue는 그 대상의 하위 사유
+# send-back 이유 — type은 문제 대상, issue는 문제 내용
 CauseType = Literal["assumption", "data_source", "method_selection"]
 AssumptionIssue = Literal["no_evidence", "value_out_of_range", "not_distinct", "double_counted"]
-DataSourceIssue = Literal["insufficient", "contaminated", "irrelevant"]
+DataSourceIssue = Literal["insufficient", "contaminated", "irrelevant", "outdated"]
 CauseIssue = AssumptionIssue | DataSourceIssue
 
 _ASSUMPTION_ISSUES = frozenset(get_args(AssumptionIssue))
@@ -43,28 +43,47 @@ class SourceRef(BaseModel):
 
 
 class SuspectedCause(BaseModel):
-    """검증agent의 flagged와 supply_coordination→forecast 역방향 되돌림이 같은
-    형식으로 보내는 되돌림 사유. type별로 유효한 issue가 정해져 있다(STATE_SCHEMA.md).
+    """검증agent의 flagged와 supply_coordination→forecast 역방향 send-back이 같은
+    형식으로 보내는 send-back 이유. 문제 대상(type)별로 유효한 문제 내용(issue)과 대상 필드가 정해져 있다(STATE_SCHEMA.md).
     """
 
     type: CauseType
     issue: CauseIssue | None = None
     assumption_id: str | None = None  # type이 assumption일 때 문제가 난 가정
     source: SourceRef | None = None  # type이 data_source일 때 문제가 난 소스
-    use_from: date | None = None  # 시점 기준으로 무관할 때
+    use_from: date | None = None  # outdated일 때, 이 날짜 이전 데이터는 쓰지 않음
 
     @model_validator(mode="after")
     def _check_type_issue_consistency(self) -> "SuspectedCause":
         if self.type == "assumption":
             if self.issue not in _ASSUMPTION_ISSUES:
                 raise ValueError(f"type=assumption의 issue는 {sorted(_ASSUMPTION_ISSUES)} 중 하나여야 함")
+            if self.assumption_id is None:
+                raise ValueError("type=assumption에는 assumption_id가 필요함")
         elif self.type == "data_source":
             if self.issue not in _DATA_SOURCE_ISSUES:
                 raise ValueError(
                     f"type=data_source의 issue는 {sorted(_DATA_SOURCE_ISSUES)} 중 하나여야 함"
                 )
-        elif self.issue is not None:
-            raise ValueError("type=method_selection은 issue가 없어야 함")
+            if self.assumption_id is not None:
+                raise ValueError("type=data_source에는 assumption_id가 없음")
+            if self.issue in ("contaminated", "irrelevant", "outdated") and self.source is None:
+                raise ValueError(f"issue={self.issue}에는 source가 필요함")
+            if self.issue == "outdated" and self.use_from is None:
+                raise ValueError("issue=outdated에는 use_from이 필요함")
+            if self.use_from is not None and self.issue != "outdated":
+                raise ValueError("use_from은 issue=outdated일 때만 쓴다")
+            if (
+                self.issue == "irrelevant"
+                and self.source is not None
+                and (self.source.kind, self.source.item_scope) == ("orders", "same_item")
+            ):
+                raise ValueError("orders의 irrelevant는 허용되지 않음(orders는 항상 쓰므로 소스를 제외할 수 없고 outdated만 받음)")
+        else:
+            if self.issue is not None:
+                raise ValueError("type=method_selection은 issue가 없어야 함")
+            if self.assumption_id is not None or self.source is not None or self.use_from is not None:
+                raise ValueError("type=method_selection은 대상이 모든 가정이라 assumption_id·source·use_from이 없음")
         return self
 
 
@@ -144,12 +163,13 @@ class DataSource(BaseModel):
 
 
 class ExcludedSource(BaseModel):
-    """관련 없는 데이터 — 재실행 시 다시 고르지 않는다."""
+    """쓰지 않는 데이터 — 재실행 시 다시 고르지 않는다. `irrelevant`는 관련 없는 데이터, `contaminated`는
+    send-back 이유가 오염이라 제외한 데이터다."""
 
     kind: DataKind
     item_scope: ItemScope
     refs: list[str] = Field(default_factory=list)
-    reason: Literal["irrelevant"] = "irrelevant"
+    reason: Literal["irrelevant", "contaminated"] = "irrelevant"
 
 
 class Cleaning(BaseModel):
@@ -160,25 +180,52 @@ class Cleaning(BaseModel):
 
 
 class ExcludedDriver(BaseModel):
-    """근거가 부족하거나 효과가 유의하지 않아 뺀 요인의 기록과, 영향받은 가정.
+    """근거가 부족하거나 효과가 유의하지 않아 제외한 원인의 기록과, 영향받은 가정.
 
-    영향받은 가정은 그 요인을 단 가정(제외됨) 또는 모든 가정(전제인 요인이 빠짐)이다. `reason`은
+    영향받은 가정은 그 원인을 단 가정(제외됨) 또는 모든 가정(전제인 원인이 제외됨)이다. `reason`은
     `no_significant_effect`(통계 추정에서 신뢰구간이 0을 포함), `no_evidence`(근거 데이터
-    없음·부족), `no_applicable_method`(전제를 설명변수로 받는 기법이 계산되지 않아 반영하지 못함)로 구분한다.
+    없음·부족), `no_applicable_method`(전제를 설명변수로 받는 기법이 계산되지 않아 반영하지 못함) 중 하나이거나,
+    그 원인을 제외하게 한 send-back 이유(`send_back_reason`)다.
     """
 
     driver: DriverName
     assumption_ids: list[str]
-    reason: Literal["no_significant_effect", "no_evidence", "no_applicable_method"]
+    reason: str
     rationale: str
+
+    @model_validator(mode="after")
+    def _check_reason(self) -> "ExcludedDriver":
+        if self.reason not in _DRIVER_REASONS and self.reason not in _SEND_BACK_REASONS:
+            raise ValueError(f"reason은 {sorted(_DRIVER_REASONS)} 또는 send-back 이유여야 함: {self.reason!r}")
+        return self
+
+
+_DRIVER_REASONS = frozenset(["no_significant_effect", "no_evidence", "no_applicable_method"])
+
+
+def send_back_reason(cause: SuspectedCause) -> str:
+    """send-back 이유를 `excluded_assumptions.reason`에 넣는 문자열로 만든다: `{type}:{issue}`(issue가 없으면 `{type}`)."""
+    return cause.type if cause.issue is None else f"{cause.type}:{cause.issue}"
+
+
+_SEND_BACK_REASONS = frozenset(
+    [*(f"assumption:{i}" for i in _ASSUMPTION_ISSUES), *(f"data_source:{i}" for i in _DATA_SOURCE_ISSUES), "method_selection"]
+)
 
 
 class ExcludedAssumption(BaseModel):
-    """맞는 통계기법이 하나도 없어 제외한 가정과 이유."""
+    """계산할 수 없어 제외한 가정과 이유. `reason`은 `no_applicable_method`(맞는 통계기법이 하나도 없음)이거나
+    그 가정을 제외하게 한 send-back 이유(`send_back_reason`)다."""
 
     assumption_id: str
-    reason: Literal["no_applicable_method"]
+    reason: str
     rationale: str
+
+    @model_validator(mode="after")
+    def _check_reason(self) -> "ExcludedAssumption":
+        if self.reason != "no_applicable_method" and self.reason not in _SEND_BACK_REASONS:
+            raise ValueError(f"reason은 no_applicable_method 또는 send-back 이유여야 함: {self.reason!r}")
+        return self
 
 
 class ForecastRecord(BaseModel):
@@ -299,11 +346,13 @@ class RolePermission(BaseModel):
 
 
 class EscalationRecord(BaseModel):
-    """사람(human_manager)에게 올라간 건. intervention은 진행을 멈추고 결정을
+    """사람(human_manager)에게 올라간 escalation 기록. intervention은 진행을 멈추고 결정을
     기다리며, notice는 알리기만 하고 진행한다(resolution 없음)."""
 
+    agent_id: str | None = None  # escalation 기록이 발생한 인스턴스("{company_id}:{item_id}"). 인스턴스와 무관한 엣지는 None
     trigger_edge: str
     reason: str
+    rationale: str  # 사람이 읽는 이유 설명
     target_role: Literal["human_manager"] = "human_manager"
     mode: EscalationMode = "intervention"
     status: str
