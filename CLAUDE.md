@@ -1,8 +1,7 @@
 # CLAUDE.md
 
 S&OP(Sales & Operations Planning) 개념 기반, 판매예측↔공급망조율 멀티에이전트 POC.
-여러 agent가 실제로 서로의 판단에 영향을 주는 구조(다회 협상)를 구현하는 것이
-이 프로젝트의 핵심 목표다.
+여러 agent가 실제로 서로의 판단에 영향을 주는 구조(다회 협상)를 구현하는 것이 이 프로젝트의 핵심 목표다.
 
 ## 문서 언어 안내
 
@@ -23,13 +22,13 @@ JOURNAL.md는 매 세션 통째로 읽지 않는다. 다음 상황에서만 확�
 
 ## 참고 문서
 
-- **STATE_SCHEMA.md** — State 7개 최상위 필드 스키마. State 관련 코드 작업 전 확인.
+- **STATE_SCHEMA.md** — State 8개 최상위 필드 스키마. State 관련 코드 작업 전 확인.
 - **AGENT_NODE_LIST.md** — agent/역할(role_tag) 목록, 각자의 판단 범위, 검증agent 작성
   원칙. agent 관련 코드 작업 전 확인. **새 agent/역할을 추가하기 전, 여기 기준으로
   기존 agent에 흡수될 수 있는지 먼저 검토한다.**
 - **GRAPH_FLOW.md** — agent 간 신호 흐름, 검증 게이트, 엣지별 반복/종료조건.
   협상/라운드/종료조건/엣지 관련 코드 작업 전 확인.
-- **MILESTONES.md** — M0~M8 마일스톤별 범위·검증 기준, 전 마일스톤 공통 규칙(검증
+- **MILESTONES.md** — M0~M8 마일스톤별 범위·검증 기준, 전 마일스톤 공통 규칙(검증 
   게이트 일반화 라우팅, 판단 스텁의 pydantic 스키마 통일, DESIGN.md 갱신 시점).
   **마일스톤 단위로 구현을 시작하기 전 반드시 해당 마일스톤 절을 확인한다.**
 
@@ -95,12 +94,11 @@ STATE_SCHEMA.md, AGENT_NODE_LIST.md, GRAPH_FLOW.md, MILESTONES.md를 쓰거나 �
 
 - 함수명·역할 태그는 snake_case 영어, docstring·print·로그 메시지는 한국어.
 - 로깅은 `logging` 없이 `print()`. 형식은 `[role_tag:함수명] key=value`.
-- ID는 `f"{PREFIX}-{uuid.uuid4().hex[:8].upper()}"` 꼴, 타임스탬프는
-  `datetime.now(timezone.utc).isoformat()`.
-- State는 pydantic `BaseModel`로 정의한다. 부분 갱신은 `model_copy(update={...})`를
+- ID는 `f"{PREFIX}-{uuid.uuid4().hex[:8].upper()}"` 꼴, 타임스탬프는 `datetime.now(timezone.utc).isoformat()`.
+- State는 pydantic `BaseModel`로 정의한다. 부분 갱신은 `model_copy(update={...})`를 
   쓰고, `cast()` 없이 가는 것을 목표로 한다(막히면 JOURNAL.md에 이유를 남긴다).
 - 구조화된 LLM 출력(판단+근거)도 pydantic 모델로 정의한다.
-- 모든 State 읽기/쓰기는 `role_permissions`를 검사하는 wrapper 함수(`get_field`/
+- 모든 State 읽기/쓰기는 `role_permissions`를 검사하는 wrapper 함수(`get_field`/ 
   `set_field`)를 통해서만 한다. 직접 State를 건드리지 않는다.
 - 소스 코드는 src/sop/ 패키지 아래에 있다
 - agent 간 상호작용(엣지)을 구현하는 모듈의 파일명·함수명은 `interaction_protocol`의
@@ -109,7 +107,7 @@ STATE_SCHEMA.md, AGENT_NODE_LIST.md, GRAPH_FLOW.md, MILESTONES.md를 쓰거나 �
   묶는 상위 진입점 함수는 그 동작을 그대로 드러내는 이름을 쓴다(예:
   candidate 선택과 라운드 협상을 잇는 함수는 `run_forecast_select_and_round`
   처럼 두 동작을 나열하거나, 감싸는 함수명들을 그대로 딴다). "negotiation"처럼
-  `negotiation_log`(필드명)·리포 이름(-negotiation-poc)과 겹치는 범용 단어는
+  `negotiation_log`(필드명)·리포 이름(-negotiation-poc)과 겹치는 범용 단어는 
   파일명·함수명 어디에도 쓰지 않는다.
   - 코드 주석과 docstring에는 현재 동작과 그 이유만 쓴다. 삭제된 기능이나 바뀐 경위("~는 ~가 아니다", "처음에는 ~였다")는 쓰지 않는다. 경위는 JOURNAL.md에 남긴다.
 

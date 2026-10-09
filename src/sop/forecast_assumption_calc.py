@@ -87,7 +87,7 @@ def _calculate_one(
 ) -> tuple[Assumption | None, list[StructuredJudgment], str]:
     """가정 하나의 기법을 고르고 값을 계산한다. 맞는 기법이 없으면 (None, 판단, 이유)를 반환한다.
 
-    `exclude`는 send-back 재실행이 이 가정에서 제외한 기법이다.
+    `exclude`는 재실행이 이 가정에서 제외한 기법이다.
     """
     training = collection.training_for(assumption.assumption_id)
     market = collection.evidence_series.get(("market", "category"))
@@ -145,7 +145,7 @@ def select_methods_and_calculate_values(
     전제를 반영하지 못했다는 사실과 이유를 `ExcludedDriver`로 남기며 "애매함"으로 표시한다. 원인이 있는 가정은
     맞는 기법이 없으면 제외한다. 이력이 짧아 전제 없이도 어떤 기법도 계산되지 않는 기본 가정만 제외된다. 사용할 주문이
     없어 계산할 수 없는 수집 결과면 계산하지 않고 빈 결과를 돌려준다(이유는 `collection.unusable_reason`).
-    `method_exclusions`는 send-back 재실행이 가정마다 제외한 기법이다(가정 ID별, 그 가정 안에서만 적용한다).
+    `method_exclusions`는 재실행이 가정마다 제외한 기법이다(가정 ID별, 그 가정 안에서만 적용한다).
     """
     method_exclusions = method_exclusions or {}
     if collection.unusable_reason is not None:
@@ -169,7 +169,7 @@ def select_methods_and_calculate_values(
                     ExcludedDriver(
                         driver="event",
                         assumption_ids=[assumption.assumption_id],
-                        reason="no_applicable_method",
+                        reasons=["no_applicable_method"],
                         rationale=note,
                     )
                 )
@@ -190,7 +190,7 @@ def select_methods_and_calculate_values(
             excluded.append(
                 ExcludedAssumption(
                     assumption_id=assumption.assumption_id,
-                    reason="no_applicable_method",
+                    reasons=["no_applicable_method"],
                     rationale=f"이 가정에 맞는 통계기법이 없음: {reason}",
                 )
             )

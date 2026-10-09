@@ -65,3 +65,42 @@ def test_two_drivers_sharing_the_same_evidence_are_double_counted():
 def test_violations_are_returned_as_assumption_type_suspected_causes():
     (cause,) = validate_assumptions([assumption("A-HIGH", value=500.0)], SOURCES, HISTORY)
     assert cause.type == "assumption" and cause.assumption_id == "A-HIGH" and cause.issue == "value_out_of_range"
+
+
+def causes_of(assumptions, sources=SOURCES):
+    return {(c.issue, c.assumption_id): c.drivers for c in validate_assumptions(assumptions, sources, HISTORY)}
+
+
+def test_no_evidence_points_at_the_drivers_without_evidence_and_not_at_the_others():
+    only_orders = [DataSource(kind="orders", item_scope="same_item")]
+    mixed = assumption("A-MIX", [driver(), driver(name="event", kind="orders", scope="same_item", refs=("ITEM-1",))])
+
+    assert causes_of([mixed], only_orders) == {("no_evidence", "A-MIX"): ["category_trend"]}
+
+
+def test_double_counted_points_at_the_drivers_whose_evidence_overlaps():
+    twin = assumption("A-TWIN", [driver(), driver(name="event"), driver(name="price", kind="pos", scope="same_item", refs=("X",))])
+
+    with_pos = [*SOURCES, DataSource(kind="pos", item_scope="same_item")]
+
+    assert causes_of([twin], with_pos) == {("double_counted", "A-TWIN"): ["category_trend", "event"]}
+
+
+def test_issues_that_cannot_point_at_a_driver_leave_drivers_null():
+    first = assumption("A-1", [driver()], value=500.0)
+    second = assumption("A-2", [driver()], value=105.0)
+
+    found = causes_of([first, second])
+
+    assert found == {("value_out_of_range", "A-1"): None, ("not_distinct", "A-2"): None}
+
+
+def test_one_assumption_can_carry_several_causes():
+    twin = assumption("A-TWIN", [driver(), driver(name="event")], value=500.0)
+    only_orders = [DataSource(kind="orders", item_scope="same_item")]
+
+    assert causes_of([twin], only_orders) == {
+        ("no_evidence", "A-TWIN"): ["category_trend", "event"],
+        ("double_counted", "A-TWIN"): ["category_trend", "event"],
+        ("value_out_of_range", "A-TWIN"): None,
+    }

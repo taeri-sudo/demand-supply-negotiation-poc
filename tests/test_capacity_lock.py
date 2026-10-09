@@ -33,7 +33,7 @@ async def _unsafe_decrement(store: StateStore, amount: float) -> None:
     await asyncio.sleep(0)  # 다른 태스크가 끼어들 기회
     updated = pool.model_copy(update={"remaining_capacity": pool.remaining_capacity - amount})
     store.set_field(
-        "supply_coordination", "capacity_pools[0]", updated, notify_channel="capacity_pools"
+        "supply_coordination", "capacity_pools[0]", updated
     )
 
 
@@ -45,7 +45,7 @@ async def _locked_decrement(store: StateStore, amount: float) -> None:
         await asyncio.sleep(0)
         updated = pool.model_copy(update={"remaining_capacity": pool.remaining_capacity - amount})
         store.set_field(
-            "supply_coordination", "capacity_pools[0]", updated, notify_channel="capacity_pools"
+            "supply_coordination", "capacity_pools[0]", updated
         )
 
 
@@ -90,7 +90,6 @@ async def test_adjust_capacity_pool_helper_is_safe_under_concurrency():
                 "POOL-1",
                 delta=-5,
                 reason="test",
-                notify_channel="capacity_pools",
             )
             for _ in range(10)
         )

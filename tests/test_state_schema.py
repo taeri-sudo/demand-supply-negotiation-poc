@@ -22,7 +22,7 @@ from sop.state import (
     State,
     SuspectedCause,
     ValidationResult,
-    send_back_reason,
+    suspected_cause_reason,
 )
 
 
@@ -110,8 +110,8 @@ def test_excluded_source_reason_is_irrelevant_or_contaminated():
         ExcludedSource.model_validate({"kind": "market", "item_scope": "category", "reason": "unknown"})
 
 
-def test_excluded_assumption_reason_is_no_applicable_method_or_a_send_back_reason():
-    assert ExcludedAssumption(assumption_id="A", reason="no_applicable_method", rationale="x").reason == "no_applicable_method"
+def test_excluded_assumption_reason_is_no_applicable_method_or_a_suspected_cause_reason():
+    assert ExcludedAssumption(assumption_id="A", reasons=["no_applicable_method"], rationale="x").reasons == ["no_applicable_method"]
     causes = [
         (SuspectedCause(type="assumption", issue="no_evidence", assumption_id="A"), "assumption:no_evidence"),
         (
@@ -121,10 +121,14 @@ def test_excluded_assumption_reason_is_no_applicable_method_or_a_send_back_reaso
         (SuspectedCause(type="method_selection"), "method_selection"),
     ]
     for cause, expected in causes:
-        assert send_back_reason(cause) == expected
-        assert ExcludedAssumption(assumption_id="A", reason=expected, rationale="x").reason == expected
+        assert suspected_cause_reason(cause) == expected
+        assert ExcludedAssumption(assumption_id="A", reasons=[expected], rationale="x").reasons == [expected]
+    several = ["assumption:no_evidence", "method_selection"]
+    assert ExcludedAssumption(assumption_id="A", reasons=several, rationale="x").reasons == several  # 이유가 여럿이면 모두 넣는다
     with pytest.raises(ValidationError):
-        ExcludedAssumption(assumption_id="A", reason="data_source:unknown", rationale="x")
+        ExcludedAssumption(assumption_id="A", reasons=["data_source:unknown"], rationale="x")
+    with pytest.raises(ValidationError):
+        ExcludedAssumption(assumption_id="A", reasons=[], rationale="x")
 
 
 @pytest.mark.parametrize(
@@ -163,14 +167,44 @@ def test_suspected_cause_rejects_issue_of_the_other_type():
         SuspectedCause(type="assumption")  # issue 누락
 
 
-def test_validation_result_carries_structured_suspected_cause():
+def test_validation_result_carries_a_list_of_structured_suspected_causes():
     result = ValidationResult(
-        status="flagged",
-        suspected_cause=SuspectedCause(type="assumption", issue="not_distinct", assumption_id="A-2"),
+        status="failed",
+        suspected_causes=[
+            SuspectedCause(type="assumption", issue="not_distinct", assumption_id="A-2"),
+            SuspectedCause(type="assumption", issue="no_evidence", assumption_id="A-3", drivers=["category_trend"]),
+        ],
         validator_role_tag="forecast_validation",
     )
-    assert result.suspected_cause is not None
-    assert result.suspected_cause.assumption_id == "A-2"
+    assert [c.assumption_id for c in result.suspected_causes] == ["A-2", "A-3"]
+    assert result.suspected_causes[1].drivers == ["category_trend"]
+
+
+def test_validation_result_causes_follow_the_status():
+    cause = SuspectedCause(type="assumption", issue="not_distinct", assumption_id="A-2")
+    assert ValidationResult(status="passed").suspected_causes == []
+    assert ValidationResult(status="error").suspected_causes == []
+    with pytest.raises(ValidationError):
+        ValidationResult(status="failed")  # failed에는 이유가 1개 이상 필요하다
+    with pytest.raises(ValidationError):
+        ValidationResult(status="passed", suspected_causes=[cause])
+
+
+def test_suspected_cause_drivers_are_only_for_the_issues_that_can_point_at_a_driver():
+    for issue in ("no_evidence", "double_counted"):
+        assert SuspectedCause(type="assumption", issue=issue, assumption_id="A", drivers=["event"]).drivers == ["event"]
+        assert SuspectedCause(type="assumption", issue=issue, assumption_id="A").drivers is None  # null = 모든 원인
+    for issue in ("value_out_of_range", "not_distinct"):
+        with pytest.raises(ValidationError):  # 원인을 지목할 수 없는 문제 내용은 항상 null
+            SuspectedCause(type="assumption", issue=issue, assumption_id="A", drivers=["event"])
+    with pytest.raises(ValidationError):  # 빈 목록은 허용하지 않는다
+        SuspectedCause(type="assumption", issue="no_evidence", assumption_id="A", drivers=[])
+    with pytest.raises(ValidationError):  # 중복
+        SuspectedCause(type="assumption", issue="no_evidence", assumption_id="A", drivers=["event", "event"])
+    with pytest.raises(ValidationError):  # assumption이 아닌 유형에는 없다
+        SuspectedCause(type="data_source", issue="insufficient", drivers=["event"])
+    with pytest.raises(ValidationError):
+        SuspectedCause(type="method_selection", drivers=["event"])
 
 
 def test_supply_coordination_to_human_manager_notice_protocol_entry():
@@ -203,12 +237,15 @@ def test_escalation_record_mode_distinguishes_notice_from_intervention():
         )
 
 
-def test_excluded_driver_reason_is_a_driver_reason_or_a_send_back_reason():
+def test_excluded_driver_reason_is_a_driver_reason_or_a_suspected_cause_reason():
     base = {"driver": "category_trend", "assumption_ids": ["A"], "rationale": "x"}
-    assert ExcludedDriver(reason="no_evidence", **base).reason == "no_evidence"
-    assert ExcludedDriver(reason="assumption:value_out_of_range", **base).reason == "assumption:value_out_of_range"
+    assert ExcludedDriver(reasons=["no_evidence"], **base).reasons == ["no_evidence"]
+    several = ["assumption:value_out_of_range", "assumption:no_evidence"]
+    assert ExcludedDriver(reasons=several, **base).reasons == several
     with pytest.raises(ValidationError):
-        ExcludedDriver(reason="unknown", **base)
+        ExcludedDriver(reasons=["unknown"], **base)
+    with pytest.raises(ValidationError):
+        ExcludedDriver(reasons=[], **base)
 
 
 def test_suspected_cause_targets_follow_the_type():

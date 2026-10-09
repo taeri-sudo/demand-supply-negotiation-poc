@@ -114,14 +114,14 @@ def check_drivers(
             ExcludedDriver(
                 driver=driver,
                 assumption_ids=affected,
-                reason=decision.judgment["decision"],
+                reasons=[decision.judgment["decision"]],
                 rationale=decision.reasoning,
             )
         )
     kept = [a for a in assumptions if not any(d.driver in failed for d in a.drivers)]
     kept_premises = [p for p in premises if p.driver not in failed]
     log(ROLE_TAG, "check_drivers", kept=[a.assumption_id for a in kept],
-        excluded=[(e.driver, e.reason) for e in excluded])
+        excluded=[(e.driver, e.reasons) for e in excluded])
     return DriverCheck(
         assumptions=kept, premises=kept_premises, excluded_drivers=excluded, judgments=judgments
     )

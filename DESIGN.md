@@ -2,41 +2,57 @@
 
 demand-supply-negotiation-poc의 **현재 구현 상태**를 담는 문서. State/agent/그래프
 흐름의 최신 설계는 STATE_SCHEMA.md/AGENT_NODE_LIST.md/GRAPH_FLOW.md를 직접 참고 —
-값이 바뀌면 그 파일들을 직접 고치고, 여기서는 중복 서술하지 않는다. "왜 그렇게
-됐는지"의 논거는 JOURNAL.md 참고.
+값이 바뀌면 그 파일들을 직접 고치고, 여기서는 중복 서술하지 않는다. "왜 그렇게 됐는지"의 논거는 JOURNAL.md 참고.
 
 ## 진행 상황
 
 - **M0 (State 스켈레톤 + 접근통제 wrapper)**: State 최상위 필드 전체를 pydantic으로
-  정의하고, 모든 읽기/쓰기가 role_permissions 검사를 거치는 wrapper(쓰기 시 큐 push를
-  함께 수행)와 capacity_pools 증감용 asyncio.Lock 헬퍼를 구현했다. 권한 거부, 쓰기-큐
-  push 짝, 중첩 경로, Lock 유무에 따른 동시성 경쟁을 테스트로 확인했다. agent 로직은 없다.
+  정의하고, 모든 읽기/쓰기가 role_permissions 검사를 거치는 wrapper와 capacity_pools
+  증감용 asyncio.Lock 헬퍼를 구현했다(신호 규칙은 M3). 권한 거부, 중첩 경로, Lock 유무에 따른
+  동시성 경쟁을 테스트로 확인했다. agent 로직은 없다.
 - **M1 (forecast → supply_coordination 단방향 배분)**: forecast가 가정 중 하나를 규칙으로 골라 최종 요청량(시나리오)으로 삼으면
   supply_coordination이 그 값을 그대로 담은 배분안 하나를 만든다. 라운드·협상은
   없고 인스턴스는 (회사, item) 단위다. 회사가 하나뿐이라 우선순위 경쟁이 없어 값을 그대로
   전달하는 것으로 근사했다(실제 경쟁은 M4). 최초의 라운드 협상 구현은 설계 검토로 폐기하고
-  다시 짰다(JOURNAL.md 2026-09-16, 2026-09-20, 2026-09-21, 2026-09-23). 아직 없는 것:
-  역방향 send-back(plan agent가 M5), interaction_protocol을 읽는 코드(검증agent가 M3).
+  다시 짰다(JOURNAL.md 2026-09-16, 2026-09-20, 2026-09-21, 2026-09-23). 아직 없는 것: 역방향 send-back(plan agent가 M5).
 - **M2 (forecast agent 실물 판단 로직)**: State 스키마를 확정 스키마(가정이 기법별 값을 가지는 2단 구조, 구조화된
-  send-back 이유)로 교체했고, 외부 경계 데이터 층(고객사 POS, INA-R·IPC 지수 시리즈, 물가 보정, 우리 매출 차감,
+  의심되는 원인)로 교체했고, 외부 경계 데이터 층(고객사 POS, INA-R·IPC 지수 시리즈, 물가 보정, 우리 매출 차감,
   수주 생성기와 인스턴스 16개의 고정 샘플)을 만들었다. 내부 단계 전부를 규칙으로 구현했다: 데이터 수집·소스 판단(정제,
   첫 주문과 프로모션 기록 없음 구간 처리, 이력 부족 시 보강), 가정 정의(원인과 근거를 선언만 함), 원인 확인
   (category_trend는 통계 유의성, event 전제는 기록 충분성), 가정마다 통계기법을 여러 개 골라 과거 정확도로 기법
   가중치를 정하는 통계기법 선택, 가정별 요청량 계산, 가정 선택(최종 요청량 = 시나리오), 가정 검증 조건 함수.
   판단 수치는 한 곳에 모아 승인값과 초기값을 구분했고 통계 호출은 한 어댑터 모듈에서만 한다.
-  이력 보강은 가정마다 독립으로 하고 월마다 우선순위가 가장 높은 데이터를 쓴다. send-back 재실행은 send-back 이유별
+  이력 보강은 가정마다 독립으로 하고 월마다 우선순위가 가장 높은 데이터를 쓴다. 재실행은 의심되는 원인별
   재개 지점(가정 정의, 데이터 수집, 통계기법 선택)부터 이후 단계를 전부 다시 돌고, 모든 대응을 대상 가정에만 적용한다
   (`assumption`은 지정한 가정, `data_source`는 그 소스를 쓰는 가정이며 소스를 지정하지 않은 `insufficient`와
   `method_selection`은 모든 가정). 대상 가정이 대응할 수단이 없으면(재실행해도 입력이 직전 재실행과 같은 가정 포함)
-  그 가정을 제외하고 send-back 이유를 제외 이유로 기록한다. 기법 제외는 한 번의 send-back 처리 동안 가정 안에서만
+  그 가정을 제외하고 의심되는 원인을 제외 이유로 기록한다. 기법 제외는 한 번의 재실행 처리 동안 가정 안에서만
   누적하고 State에는 두지 않는다. 사람 escalation은 계산된 가정이 없을 때(`no_computable_assumption`, 사용할
   주문이 없는 경우 포함), 가정 선택 ③(`selection_unresolved`), 재실행으로 가정이 모두 제외된 경우(`options_exhausted`,
-  send-back 전에 계산된 시나리오가 있었을 때만이며 그 값을 그대로 둠)를 `escalation_records`에 `status: "open"`으로 남기고,
+  재실행 전에 계산된 시나리오가 있었을 때만이며 그 값을 그대로 둠)를 `escalation_records`에 `status: "open"`으로 남기고,
   처리되지 않은(사람의 응답을 기다리는) 동안 그 인스턴스의 요청량을 supply_coordination으로 보내지 않는다.
   현재 한계: 샘플 인스턴스 16개 모두 category_trend 원인이 유의하지 않아 driver가 붙은 가정이 생기지 않는다.
-  send-back을 보내는 쪽(검증agent M3, supply_coordination M5)이 없어 재실행은 합성 입력으로만 검증했다.
+  supply_coordination이 보내는 send-back(M5)은 없다.
   아직 없는 것: 가정 발생 가능성(`occurrence_likelihood`)을 채우는 규칙, escalation 기록의 사람 처리(M4).
   판단 근거는 JOURNAL.md 2026-09-30, 2026-10-01, 2026-10-02, 2026-10-03, 2026-10-05, 2026-10-06, 2026-10-07 참고.
+- **M3 (검증agent 공통 틀 + `forecast_validation`)**: forecast → 검증agent → supply_coordination 순서로 흐름을 바꿨다. 채널은 agent의 role_tag 하나이고, 신호는 기록의 상태
+  (사람 대기, 되돌려짐, 전달됨, 판정됨, 검증 대기)가 바뀔 때 그 상태의 담당 agent의 채널로 자동으로 가며, 받는 쪽은 기록의 상태를 읽어 자기
+  상태일 때만 일한다. 여러 곳을 함께 쓰는 모든 경로(기록과 로그 항목, 판정과 로그와 escalation 기록, 보류)는 `update_state` 한 번으로 쓴다.
+  검증agent는 판정만 기록하고 다음 agent에게 전달하지 않는다. 경로 위 agent마다 카드(`agent_cards`)가 있고 forecast는 `passed` 뒤에 카드의
+  `known_agents` 중 `accepts`가 자기 `produces`와 맞는 agent를 `forward_to`에 쓴다(후보가 없거나 여럿이면 escalation, 여럿일 때의 판단은 M7,
+  `known_agents` 밖은 쓰기 거부, 중복 전달은 전달됨 상태로 막는다). 받는 agent가 자기 카드의 `accepts`와 맞지 않으면 `send_back`에 `misrouted`를
+  써서 되돌리고, forecast는 재실행 없이 반송한 agent를 뺀 후보로 다시 고른다. `send_back` 필드와 되돌려짐 상태, 값 문제 `send_back`을 받은
+  forecast의 재실행은 만들었고, 값 문제 `send_back`을 쓰는 쪽(supply_coordination)과 plan agent 카드는 M5다. `interaction_protocol`에 작성agent의 edge
+  항목이 있어야 신호를 처리하고 작성agent별 검증 규칙이 동작을 정한다. 검증agent의 쓰기 권한은 `forecast_records[*].validation`뿐이다.
+  `forecast_validation`의 규칙은 가정 검증 조건 4개이고 `assumption` 유형만 보낸다. `failed`는 `suspected_causes` 목록으로 가고 forecast가
+  한 번의 재실행으로 처리한다(가장 앞 재개 지점, 단계 순서 적용, 수단 없음 비교는 가정마다 한 번, 제외 이유는 `reasons` 목록에 모두
+  기록). `no_evidence`·`double_counted`는 문제 원인을 `drivers`로 지목한다. 검증 절차나 forecast 실행이 예외로 끝나면 재시도 없이 바로
+  `validation_error`·`forecast_run_error` escalation 기록을 만들고 그 인스턴스만 멈춘다(forecast 기록은 이전 값 그대로). 미처리
+  `intervention` escalation 기록이 있는 인스턴스는 첫 실행을 포함해 실행하지 않고 건너뛴 사실만 로그에 남긴다. escalation 기록의 `log_seq`는
+  보류에 들어갈 때의 값을 담은 로그 항목을 가리킨다. 이력은 역할별 로그(`role_logs`)에 남고 `negotiation_log`는 `seq` 순으로 합쳐 읽는
+  결과다. escalation 긴급도는 코드의 reason→긴급도 대응표로 둔다. 과거 월별 요청량은 forecast와 같은 기준일의 스냅샷 주문 이력에서 읽는다.
+  현재 한계: forecast 외 작성agent의 판정 전달과 연속 횟수 헬퍼는 더미 role_tag와 합성한 `exchanges`로만 검증했다. 실제 라운드
+  누적형 엣지는 M5, escalation의 사람 처리는 M4다. 판단 근거는 JOURNAL.md 2026-10-08 참고.
 
 ## 데이터 출처
 
@@ -45,14 +61,12 @@ Favorita는 Kaggle 대회 규칙상 비상업적 용도로만 쓸 수 있고 재
 이를 가공한 샘플 모두 저장소에 포함하지 않는다.
 
 - **Favorita** (`data/raw/favorita/`): Kaggle "Corporación Favorita Grocery Sales
-  Forecasting"(2017년 대회, 상품 단위). 다운로드에 Kaggle 로그인과 대회 규칙 동의가
-  필요하다.
+  Forecasting"(2017년 대회, 상품 단위). 다운로드에 Kaggle 로그인과 대회 규칙 동의가 필요하다.
   https://www.kaggle.com/competitions/favorita-grocery-sales-forecasting/data
 - **INA-R** (`data/raw/ina_r/`): INEC, 2003년 1월부터 2017년 12월까지 월별 시리즈.
   https://www.ecuadorencifras.gob.ec/ina-r-2017/
 - **IPC** (`data/raw/ipc/`): INEC, 2026년 6월 판 압축 파일. 사용하는 파일은 압축 안의
-  `Series IPC Empalmadas/ipc_ind_nac_reg_ciud_emp_clase_06_2026.xlsx`의 `1. NACIONAL`
-  시트다.
+  `Series IPC Empalmadas/ipc_ind_nac_reg_ciud_emp_clase_06_2026.xlsx`의 `1. NACIONAL` 시트다.
   https://www.ecuadorencifras.gob.ec/indice-de-precios-al-consumidor/
 - **생성 샘플** (`data/generated/`): 필요하면 raw 데이터와 고정 시드로 sample_builder를
   실행해 같은 파일을 만든다(생성기나 파라미터를 바꾸면 결과가 달라지므로 다시 만들어야
@@ -70,7 +84,7 @@ Favorita는 Kaggle 대회 규칙상 비상업적 용도로만 쓸 수 있고 재
 
 ## category_trend 원인과 가정별 통계기법
 
-시장 변화율이 우리 수요 변화율에 주는 영향을 통계로 확인해 category_trend 원인을 단 가정을 남길지 정한다. 가정 정의는 원인과 필요한 근거(시장 시계열)만 선언하고, 아래 확인은 근거를 수집한 뒤 "통계기법 선택"의 첫
+시장 변화율이 우리 수요 변화율에 주는 영향을 통계로 확인해 category_trend 원인을 단 가정을 남길지 정한다. 가정 정의는 원인과 필요한 근거(시장 시계열)만 선언하고, 아래 확인은 근거를 수집한 뒤 "통계기법 선택"의 첫 
 판단(원인 확인)이 한다. 신뢰구간이 0을 포함하면 그 원인을 단 가정을 제외한다. 시장 지표에서 가정의 내용을 정하는
 자리는 지금 규칙이 채우고, M7에서 LLM이 외부 정보로 같은 스키마로 이어받는다.
 
@@ -109,20 +123,26 @@ Favorita는 Kaggle 대회 규칙상 비상업적 용도로만 쓸 수 있고 재
   사이클 안에서 값 변경이 전파되는 방식(쓰기 시 즉시 큐 신호)은 이벤트 반응형을 유지한다.
   실무 전환 시 주기 시작에 forecast 태스크가 몰릴 수 있어 validation agent에만 적용한
   워커풀 패턴을 forecast에도 적용할 여지를 열어둔다.
+- **검증agent는 판정만 하고 라우팅은 각 agent 자신의 역할로 분리, edge 추가 시 코드 변경 불필요**: 새 edge(더미)를
+  `interaction_protocol`에 항목을 더하는 것만으로 검증agent 코드 수정 없이 같은 흐름을 통과함을 확인했다.
 
 ## 아직 결정 안 된 것 / 다음에 확인할 것
 
+- **다음 계획 주기에서의 보류 처리(M4)**: 지금은 처리되지 않은 `intervention` escalation 기록이 있는 인스턴스를 첫 실행을 포함해 실행하지
+  않고 건너뛴 사실만 forecast 로그에 남긴다. 다음 계획 주기에도 사람이 처리하지 않은 보류가 남아 있을 때 그 주기의 실행을 어떻게 할지
+  (건너뜀 유지, 새 주기 값으로 대체, escalation 갱신 등)는 사람 처리 흐름을 만드는 M4에서 정한다.
+- **신호를 꺼낸 뒤 처리 중 실패하면 그 일이 사라지는 문제(M4)**: `update_state`가 예외로 실패하면 삼키지 않고 그대로 올려 멈춘다. 그런데
+  받는 쪽이 큐에서 신호를 꺼낸 뒤 처리 중에 실패하면 그 신호가 큐에서 이미 빠져 있어 그 일이 다시 처리되지 않는다. 인스턴스를 태스크로 도는
+  M4에서 신호를 어떻게 되살릴지(다시 넣기, 상태를 훑어 처리 대기인 기록 찾기 등) 정한다.
+- **예외 종류별 처리**: 검증agent와 forecast 실행의 예외는 지금 모두 시스템 오류(error)로 보고 바로 escalation한다. 처리가 달라야
+  하는 예외가 생기면(예: M7 LLM 호출의 일시적 오류와 계산·코드 오류) 예외 종류별 처리를 정한다.
+- **forecast 실행 구조의 워커풀 전환**: 예측 주기 단위를 좁히거나 기간이 다른 예측을 함께 처리할 때 검토한다. 전환 시 안건별
+  잠금, 기록 번호로 지난 판정 걸러내기, 재실행 입력값의 State 저장, 신호를 집을 때 보류 확인이 필요하다.
 - **비용 기반 요청량 결정의 위치가 미정**: 비용 기반 요청량 결정은 forecast 밖의 일이다. 비용이 요청량을 바꾸면
   예측과 준비량이 섞이기 때문이다. 어디서 할지(예: supply_coordination 또는 별도 단계)는 정하지 않았다.
   `cost_inputs.py`(원가 입력, 과잉·부족 비용 계산)와 그 테스트는 보존한다.
-- **가정 선택 세 기준값을 `interaction_protocol` 항목으로 옮길지**: `ASSUMPTION_CLOSE_REL_RANGE`,
-  `ASSUMPTION_SPLIT_REL_RANGE`, `ASSUMPTION_CLEAR_LEADER_RATIO`는 같은 잣대의 단계라 옮긴다면 세 값을 함께
-  옮긴다. 표를 읽는 코드가 생기는 M3에서 정하고, 그때까지는 `judgment_thresholds.py`에 둔다.
-- **`suspected_cause` 구조 일반화**: `type`, `issue`는 유지하고 `targets: [{kind, id}]`, `params`를 두면
-  `assumption_id`·`source`가 합쳐지고 원인(driver) 지정이 `kind`로 들어간다. 정의는 pydantic 모델 하나로 하고 M7에서
-  `model_json_schema()`로 LLM 출력 형식에 쓴다. 결정은 M3.
-- **send-back에서 원인을 지정할 수 있는 문제 내용**: 원인 지정이 가능한 문제 내용은 `no_evidence`, `double_counted`뿐이고
-  나머지는 지금처럼 가정 단위 대응이다. 위 구조 일반화를 정할 때 함께 확인한다.
+- **같은 소스에 반대되는 재실행 대응이 함께 올 때의 우선 규칙(M5)**: M3의 재실행은 이유 목록을 단계 순서대로 모두
+  적용하고 서로 반대되는 대응(예: 소스 제외와 그 소스 보강)의 우선순위는 정하지 않았다. plan agent 검증 규칙이 생기는 M5에서 정한다.
 - **supply_coordination의 최소 구매 약정 처리 규칙이 미정**: 구속력 있음은 배분의 하한, 구속력 없음은 이행
   불확실성 반영이라는 방향만 정했다. 구체 규칙, 이행 불확실성을 어떤 값으로 반영할지, 알림 기준(구속력 없음이 더
   낮음)의 측정 대상은 M4·M5에서 정한다.
@@ -141,7 +161,7 @@ Favorita는 Kaggle 대회 규칙상 비상업적 용도로만 쓸 수 있고 재
   않는다. negotiation_log에서 같은 시기 여러 요청이 자주 겹치는 패턴이 실제로 드러나면
   GRAPH_FLOW.md의 `promoted_from_trace` 승격 경로로 추가를 검토한다.
 - **role_permissions에 `w`만 있고 대응하는 `r`이 없는 조합을 막을지**: 지금은 허용한다.
-  negotiation_log처럼 기록용 스트림에 append만 하는 역할이면 w-only가 자연스러울 수 있어
+  `role_logs.{role_tag}`처럼 기록용 스트림에 append만 하는 역할이면 w-only가 자연스러울 수 있어
   오탈자라고 단정할 근거가 없다. 실제 agent별 권한이 채워진 뒤 w-only 조합이 나타나는지,
   의도된 것인지 보고 pydantic 검증으로 막을지 재판단한다.
 - **field_path 조건부 선택을 caller-side 헬퍼로 뽑아낼지**: 지금은 agent마다 인덱스 탐색을 직접
@@ -157,13 +177,11 @@ Favorita는 Kaggle 대회 규칙상 비상업적 용도로만 쓸 수 있고 재
 
 ## 확장 지점
 
-지금은 안 만들지만 구조적으로 열어둔 부분(예: interaction_protocol의 `promoted_from_trace`
-경로, 공급망계획agent 간 직접 협상).
+지금은 안 만들지만 구조적으로 열어둔 부분(예: interaction_protocol의 `promoted_from_trace` 경로, 공급망계획agent 간 직접 협상).
 
 ## 실무 전환 시 고려사항
 
-Step1의 "하지 않은 것" 목록과 같은 성격 — 정직한 스코프 명시용. mock/샘플링 데이터, 실제 배포,
-실시간 다중 사용자 등 실무 전환 시 별도로 다뤄야 할 것들.
+Step1의 "하지 않은 것" 목록과 같은 성격 — 정직한 스코프 명시용. mock/샘플링 데이터, 실제 배포, 실시간 다중 사용자 등 실무 전환 시 별도로 다뤄야 할 것들.
 
 **INA-R 상품군 매핑의 한계**: 상품군 하나로 INA-R 3자리 그룹(D코드) 하나를 특정할 수 있으면 그
 D코드의 월별 변화율을 가중이나 평균 없이 그대로 쓴다. 특정할 수 없는 상품군(GROCERY I, FROZEN
@@ -200,11 +218,9 @@ FOODS, DELI)은 D151, D152, D153, D154 네 코드의 월별 변화율을 단순 
 수주, 852 판매·재고) 기준으로 두는 것이다. 현재 샘플은 대응하는 실제 코드가 없어 `CUST-44`
 (Favorita 매장 번호), `ITEM-nnn`(Favorita 상품 번호) 같은 샘플 내부 식별자를 쓰고 필드 이름만 EDI에
 대응하는 이름을 쓴다. 실데이터를 연동하는 M7에서 외부 데이터 인터페이스 안에 식별자를
-GTIN/GLN으로 바꾸는 변환을 추가해야 하며, agent 판단 로직은 식별자 문자열을 해석하지 않으므로
-이 교체로 바뀌지 않아야 한다.
+GTIN/GLN으로 바꾸는 변환을 추가해야 하며, agent 판단 로직은 식별자 문자열을 해석하지 않으므로 이 교체로 바뀌지 않아야 한다.
 
 **category_trend 추정의 우리 수요는 주문이 아니라 POS다 (실무 전환 시 실제 주문 이력으로 교체)**: 현재 주문은
 수주 생성기가 POS 위에서 만든 값이라 시장과의 관계를 재는 근거로 맞지 않아, 같은 item의 POS 월별 합계를
 우리 수요로 쓴다. 실제 고객사의 주문 이력이 생기면 우리가 실제로 받은 주문(고객사 재고 정책이 반영된 값)과
-시장 변화율의 관계를 추정하도록 바꿔야 한다. POS는 고객사 재고 정책을 거치기 전 소비자 판매라 주문 변화율과
-다르다.
+시장 변화율의 관계를 추정하도록 바꿔야 한다. POS는 고객사 재고 정책을 거치기 전 소비자 판매라 주문 변화율과 다르다.

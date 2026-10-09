@@ -1,4 +1,4 @@
-"""State의 7개 최상위 필드 정의. 구조는 STATE_SCHEMA.md를 따른다.
+"""State의 8개 최상위 필드 정의. 구조는 STATE_SCHEMA.md를 따른다.
 
 State 스키마 자체가 바뀌면(필드 추가/제거/형태 변경) 이 파일과
 STATE_SCHEMA.md를 함께 고친다 — 바뀐 이유는 JOURNAL.md에 남긴다.
@@ -9,7 +9,7 @@ from typing import Literal, get_args
 
 from pydantic import BaseModel, Field, model_validator
 
-ValidationStatus = Literal["passed", "flagged", "check_failed"]
+ValidationStatus = Literal["passed", "failed", "error"]
 SelectionBasis = Literal["rule", "agent_judgment", "human"]
 CandidateStatus = Literal["generated", "selected", "rejected"]
 ResponseStatus = Literal["feasible", "infeasible", "in_progress"]
@@ -25,14 +25,16 @@ ItemScope = Literal["same_item", "similar_item", "category"]
 DriverName = Literal["category_trend", "price", "event"]
 AssumptionDefinedBy = Literal["rule", "agent_judgment"]
 
-# send-back 이유 — type은 문제 대상, issue는 문제 내용
-CauseType = Literal["assumption", "data_source", "method_selection"]
+# 의심되는 원인 — type은 문제 대상, issue는 문제 내용
+CauseType = Literal["assumption", "data_source", "method_selection", "misrouted"]
 AssumptionIssue = Literal["no_evidence", "value_out_of_range", "not_distinct", "double_counted"]
 DataSourceIssue = Literal["insufficient", "contaminated", "irrelevant", "outdated"]
 CauseIssue = AssumptionIssue | DataSourceIssue
 
 _ASSUMPTION_ISSUES = frozenset(get_args(AssumptionIssue))
 _DATA_SOURCE_ISSUES = frozenset(get_args(DataSourceIssue))
+# 문제 원인을 지목할 수 있는 문제 내용: 근거가 없는 원인들, 근거가 겹치는 원인들. 나머지는 항상 null
+_DRIVER_POINTING_ISSUES = frozenset(["no_evidence", "double_counted"])
 
 
 class SourceRef(BaseModel):
@@ -43,13 +45,15 @@ class SourceRef(BaseModel):
 
 
 class SuspectedCause(BaseModel):
-    """검증agent의 flagged와 supply_coordination→forecast 역방향 send-back이 같은
-    형식으로 보내는 send-back 이유. 문제 대상(type)별로 유효한 문제 내용(issue)과 대상 필드가 정해져 있다(STATE_SCHEMA.md).
+    """불합격 판정(`validation`)과 send-back(`send_back`)이 같은
+    형식으로 싣는 의심되는 원인 하나(한 번에 목록으로 보낸다). 문제 대상(type)별로 유효한 문제 내용(issue)과
+    대상 필드가 정해져 있다(STATE_SCHEMA.md).
     """
 
     type: CauseType
     issue: CauseIssue | None = None
     assumption_id: str | None = None  # type이 assumption일 때 문제가 난 가정
+    drivers: list[DriverName] | None = None  # type이 assumption일 때, 문제 원인을 지목할 수 있으면 그 원인들(null = 그 가정의 모든 원인)
     source: SourceRef | None = None  # type이 data_source일 때 문제가 난 소스
     use_from: date | None = None  # outdated일 때, 이 날짜 이전 데이터는 쓰지 않음
 
@@ -60,13 +64,18 @@ class SuspectedCause(BaseModel):
                 raise ValueError(f"type=assumption의 issue는 {sorted(_ASSUMPTION_ISSUES)} 중 하나여야 함")
             if self.assumption_id is None:
                 raise ValueError("type=assumption에는 assumption_id가 필요함")
+            if self.drivers is not None:
+                if self.issue not in _DRIVER_POINTING_ISSUES:
+                    raise ValueError(f"drivers는 issue가 {sorted(_DRIVER_POINTING_ISSUES)}일 때만 쓴다(그 밖에는 원인을 지목할 수 없어 null)")
+                if not self.drivers or len(set(self.drivers)) != len(self.drivers):
+                    raise ValueError("drivers는 비어 있지 않고 중복이 없어야 함(모든 원인은 null로 나타낸다)")
         elif self.type == "data_source":
             if self.issue not in _DATA_SOURCE_ISSUES:
                 raise ValueError(
                     f"type=data_source의 issue는 {sorted(_DATA_SOURCE_ISSUES)} 중 하나여야 함"
                 )
-            if self.assumption_id is not None:
-                raise ValueError("type=data_source에는 assumption_id가 없음")
+            if self.assumption_id is not None or self.drivers is not None:
+                raise ValueError("type=data_source에는 assumption_id·drivers가 없음")
             if self.issue in ("contaminated", "irrelevant", "outdated") and self.source is None:
                 raise ValueError(f"issue={self.issue}에는 source가 필요함")
             if self.issue == "outdated" and self.use_from is None:
@@ -81,24 +90,55 @@ class SuspectedCause(BaseModel):
                 raise ValueError("orders의 irrelevant는 허용되지 않음(orders는 항상 쓰므로 소스를 제외할 수 없고 outdated만 받음)")
         else:
             if self.issue is not None:
-                raise ValueError("type=method_selection은 issue가 없어야 함")
-            if self.assumption_id is not None or self.source is not None or self.use_from is not None:
-                raise ValueError("type=method_selection은 대상이 모든 가정이라 assumption_id·source·use_from이 없음")
+                raise ValueError(f"type={self.type}은 issue가 없어야 함")
+            if (
+                self.assumption_id is not None or self.drivers is not None
+                or self.source is not None or self.use_from is not None
+            ):
+                raise ValueError(f"type={self.type}에는 assumption_id·drivers·source·use_from이 없음(method_selection의 대상은 모든 가정)")
         return self
 
 
 class ValidationResult(BaseModel):
     """forecast_records/exchanges 등에 내장되는 현재값 전용 검증 상태.
 
-    이력은 여기가 아니라 negotiation_log에 쌓인다(판단용 현재값과 기록용
+    이력은 여기가 아니라 role_logs에 쌓인다(판단용 현재값과 기록용
     스냅샷 분리 — STATE_SCHEMA.md).
     """
 
     status: ValidationStatus
-    suspected_cause: SuspectedCause | None = None
+    suspected_causes: list[SuspectedCause] = Field(default_factory=list)  # failed일 때 1개 이상, 그 밖에는 빈 목록
     rationale: str | None = None
     ts: str | None = None
     validator_role_tag: str | None = None
+
+    @model_validator(mode="after")
+    def _check_causes_follow_status(self) -> "ValidationResult":
+        if self.status == "failed" and not self.suspected_causes:
+            raise ValueError("status=failed에는 suspected_causes가 1개 이상 필요함")
+        if self.status != "failed" and self.suspected_causes:
+            raise ValueError("suspected_causes는 status=failed일 때만 쓴다")
+        if any(cause.type == "misrouted" for cause in self.suspected_causes):
+            raise ValueError("misrouted는 send_back에만 쓴다(검증agent는 경로 밖이라 되돌리지 않는다)")
+        return self
+
+
+class SendBack(BaseModel):
+    """기록을 쓴 agent(작성agent)에게 되돌리는 쪽이 기록에 쓰는 send-back. `suspected_causes`는 `ValidationResult`의 것과 같은 형식이다."""
+
+    from_role: str
+    suspected_causes: list[SuspectedCause] = Field(min_length=1)
+    ts: str
+
+    @model_validator(mode="after")
+    def _misrouted_is_sent_alone(self) -> "SendBack":
+        if any(c.type == "misrouted" for c in self.suspected_causes) and len(self.suspected_causes) > 1:
+            raise ValueError("misrouted는 다른 이유와 함께 보내지 않는다")
+        return self
+
+    @property
+    def is_misrouted(self) -> bool:
+        return self.suspected_causes[0].type == "misrouted"
 
 
 # --- 1. forecast_records ------------------------------------------------------
@@ -164,7 +204,7 @@ class DataSource(BaseModel):
 
 class ExcludedSource(BaseModel):
     """쓰지 않는 데이터 — 재실행 시 다시 고르지 않는다. `irrelevant`는 관련 없는 데이터, `contaminated`는
-    send-back 이유가 오염이라 제외한 데이터다."""
+    의심되는 원인이 오염이라 제외한 데이터다."""
 
     kind: DataKind
     item_scope: ItemScope
@@ -182,49 +222,55 @@ class Cleaning(BaseModel):
 class ExcludedDriver(BaseModel):
     """근거가 부족하거나 효과가 유의하지 않아 제외한 원인의 기록과, 영향받은 가정.
 
-    영향받은 가정은 그 원인을 단 가정(제외됨) 또는 모든 가정(전제인 원인이 제외됨)이다. `reason`은
+    영향받은 가정은 그 원인을 단 가정(제외됨) 또는 모든 가정(전제인 원인이 제외됨)이다. `reasons`의 값은
     `no_significant_effect`(통계 추정에서 신뢰구간이 0을 포함), `no_evidence`(근거 데이터
     없음·부족), `no_applicable_method`(전제를 설명변수로 받는 기법이 계산되지 않아 반영하지 못함) 중 하나이거나,
-    그 원인을 제외하게 한 send-back 이유(`send_back_reason`)다.
+    그 원인을 제외하게 한 의심되는 원인(`suspected_cause_reason`)다. 이유가 여럿이면 모두 넣는다.
     """
 
     driver: DriverName
     assumption_ids: list[str]
-    reason: str
+    reasons: list[str]
     rationale: str
 
     @model_validator(mode="after")
-    def _check_reason(self) -> "ExcludedDriver":
-        if self.reason not in _DRIVER_REASONS and self.reason not in _SEND_BACK_REASONS:
-            raise ValueError(f"reason은 {sorted(_DRIVER_REASONS)} 또는 send-back 이유여야 함: {self.reason!r}")
+    def _check_reasons(self) -> "ExcludedDriver":
+        if not self.reasons:
+            raise ValueError("reasons는 비어 있으면 안 됨")
+        for reason in self.reasons:
+            if reason not in _DRIVER_REASONS and reason not in _SUSPECTED_CAUSE_REASONS:
+                raise ValueError(f"reasons의 값은 {sorted(_DRIVER_REASONS)} 또는 의심되는 원인여야 함: {reason!r}")
         return self
 
 
 _DRIVER_REASONS = frozenset(["no_significant_effect", "no_evidence", "no_applicable_method"])
 
 
-def send_back_reason(cause: SuspectedCause) -> str:
-    """send-back 이유를 `excluded_assumptions.reason`에 넣는 문자열로 만든다: `{type}:{issue}`(issue가 없으면 `{type}`)."""
+def suspected_cause_reason(cause: SuspectedCause) -> str:
+    """의심되는 원인을 제외 이유 목록(`reasons`)에 넣는 문자열로 만든다: `{type}:{issue}`(issue가 없으면 `{type}`)."""
     return cause.type if cause.issue is None else f"{cause.type}:{cause.issue}"
 
 
-_SEND_BACK_REASONS = frozenset(
+_SUSPECTED_CAUSE_REASONS = frozenset(
     [*(f"assumption:{i}" for i in _ASSUMPTION_ISSUES), *(f"data_source:{i}" for i in _DATA_SOURCE_ISSUES), "method_selection"]
 )
 
 
 class ExcludedAssumption(BaseModel):
-    """계산할 수 없어 제외한 가정과 이유. `reason`은 `no_applicable_method`(맞는 통계기법이 하나도 없음)이거나
-    그 가정을 제외하게 한 send-back 이유(`send_back_reason`)다."""
+    """계산할 수 없어 제외한 가정과 이유. `reasons`의 값은 `no_applicable_method`(맞는 통계기법이 하나도 없음)이거나
+    그 가정을 제외하게 한 의심되는 원인(`suspected_cause_reason`)이고, 이유가 여럿이면 모두 넣는다."""
 
     assumption_id: str
-    reason: str
+    reasons: list[str]
     rationale: str
 
     @model_validator(mode="after")
-    def _check_reason(self) -> "ExcludedAssumption":
-        if self.reason != "no_applicable_method" and self.reason not in _SEND_BACK_REASONS:
-            raise ValueError(f"reason은 no_applicable_method 또는 send-back 이유여야 함: {self.reason!r}")
+    def _check_reasons(self) -> "ExcludedAssumption":
+        if not self.reasons:
+            raise ValueError("reasons는 비어 있으면 안 됨")
+        for reason in self.reasons:
+            if reason != "no_applicable_method" and reason not in _SUSPECTED_CAUSE_REASONS:
+                raise ValueError(f"reasons의 값은 no_applicable_method 또는 의심되는 원인여야 함: {reason!r}")
         return self
 
 
@@ -251,6 +297,8 @@ class ForecastRecord(BaseModel):
     scenario: Scenario | None = None
     selection_basis: SelectionBasis | None = None
     validation: ValidationResult | None = None
+    forward_to: str | None = None  # passed를 확인한 작성agent가 정한 다음 agent의 role_tag
+    send_back: SendBack | None = None  # 작성agent에게 되돌리는 쪽이 쓴다
 
 
 # --- 2. capacity_pools --------------------------------------------------------
@@ -296,14 +344,41 @@ class AllocationCandidate(BaseModel):
     exchanges: list[Exchange] = Field(default_factory=list)
 
 
-# --- 4. negotiation_log --------------------------------------------------------
+# --- 4. role_logs ---------------------------------------------------------------
+
+# 사건 이름은 정해진 것만 쓴다. 값(agent_id, plan_id, 의심되는 원인, 판정 시각 등)은 이름에 넣지 않고 필드와 payload에 담는다
+LogEvent = Literal[
+    "scenario_decided",
+    "scenario_not_computable",
+    "scenario_options_exhausted",
+    "rerun",
+    "forwarded",
+    "next_agent_unresolved",
+    "misrouted_send_back",
+    "forecast_run_error",
+    "forecast_run_skipped",
+    "allocation_candidate_generated",
+    "validation_passed",
+    "validation_failed",
+    "validation_error",
+]
 
 
-class NegotiationLogEntry(BaseModel):
-    role_tag: str
-    event: str
-    round: int | None = None
+class LogEntry(BaseModel):
+    """역할별 로그의 항목. `seq`는 모든 역할을 통틀어 하나로 늘어나는 순번이고 로그 쓰기 함수가 붙인다."""
+
+    seq: int
     ts: str
+    role_tag: str
+    agent_id: str | None = None
+    event: LogEvent
+    round: int | None = None
+    payload: dict = Field(default_factory=dict)
+
+
+def merge_role_logs(role_logs: dict[str, list[LogEntry]]) -> list[LogEntry]:
+    """`negotiation_log`: 역할별 로그를 `seq` 순으로 합쳐 읽은 결과. 저장하지 않는다."""
+    return sorted((entry for entries in role_logs.values() for entry in entries), key=lambda entry: entry.seq)
 
 
 # --- 5. interaction_protocol ---------------------------------------------------
@@ -355,15 +430,33 @@ class EscalationRecord(BaseModel):
     rationale: str  # 사람이 읽는 이유 설명
     target_role: Literal["human_manager"] = "human_manager"
     mode: EscalationMode = "intervention"
+    log_seq: int | None = None  # 이 escalation과 관련된 로그 항목의 seq(role_logs)
     status: str
     resolution: str | None = None  # intervention일 때만
+
+
+# --- 8. agent_cards -------------------------------------------------------------
+
+ResponseType = Literal["optimization", "handoff", "round_accumulation"]
+
+
+class AgentCard(BaseModel):
+    """경로 위 agent의 카드(STATE_SCHEMA.md 8번 절). 다음 agent 선택과 받는 쪽 반송의 기준이다."""
+
+    role_tag: str
+    description: str  # 하는 일
+    accepts: str | None = None  # 받는 것
+    produces: str | None = None  # 내는 것
+    response_type: ResponseType  # 넘겨받은 기록에 응답하는 방식
+    known_agents: list[str] = Field(default_factory=list)  # 이 agent가 넘길 수 있는 agent의 role_tag
 
 
 class State(BaseModel):
     forecast_records: list[ForecastRecord] = Field(default_factory=list)
     capacity_pools: list[CapacityPool] = Field(default_factory=list)
     allocation_candidates: list[AllocationCandidate] = Field(default_factory=list)
-    negotiation_log: list[NegotiationLogEntry] = Field(default_factory=list)
+    role_logs: dict[str, list[LogEntry]] = Field(default_factory=dict)
     interaction_protocol: list[InteractionProtocol] = Field(default_factory=list)
     role_permissions: list[RolePermission] = Field(default_factory=list)
     escalation_records: list[EscalationRecord] = Field(default_factory=list)
+    agent_cards: list[AgentCard] = Field(default_factory=list)

@@ -10,7 +10,7 @@ import pytest
 
 from sop import data_source_judgment
 from sop.access import StateStore
-from assumption_fixtures import fixed_assumptions
+from assumption_fixtures import distinct, fixed_assumptions
 from sop.data_source_judgment import collect_instance_data, last_complete_month
 from sop.forecast_assumption_calc import select_methods_and_calculate_values
 from sop.forecast_assumption_definition import DEFAULT_ID, define_assumptions
@@ -20,14 +20,14 @@ from sop.forecast_human_manager import (
     find_protocol_entry,
     new_forecast_escalation,
     no_computable_rationale,
-    open_forecast_escalation,
     selection_unresolved_protocol_entry,
 )
-from sop.forecast_supply_allocation import run_forecast_select_and_allocate
+from sop.forecast_supply_allocation import run_forecast_select_and_submit
 from sop.promotion_episodes import Episode
-from sop.state import Assumption, ForecastRecord, InteractionProtocol, RolePermission, State
+from sop.state import Assumption, ForecastRecord, InteractionProtocol
 from test_data_source_judgment import empty_similar, make_inputs as make_plain_inputs, orders_from_pos, pos_frame
 from test_forecast_assumption_steps import make_inputs, run_pipeline
+from validation_fixtures import make_store as make_pipeline_store, validate_and_allocate
 
 pytestmark = pytest.mark.anyio
 
@@ -36,30 +36,21 @@ SNACK = "COMPANY-A:SNACK"
 
 
 def make_store() -> StateStore:
-    permissions = [
-        RolePermission(role_tag=role, field_path=field, access=access)
-        for role, fields in (
-            ("forecast", ("forecast_records", "negotiation_log", "escalation_records")),
-            ("supply_coordination", ("allocation_candidates", "negotiation_log")),
-        )
-        for field in fields
-        for access in ("r", "w")
-    ]
-    return StateStore(
-        State(
-            forecast_records=[
-                ForecastRecord(agent_id=RAMEN, company_id="COMPANY-A", item_id="RAMEN"),
-                ForecastRecord(agent_id=SNACK, company_id="COMPANY-A", item_id="SNACK"),
-            ],
-            role_permissions=permissions,  # pyright: ignore[reportArgumentType] -- 리스트 컴프리헨션의 access가 str로 추론됨
-        )
+    return make_pipeline_store(
+        [
+            ForecastRecord(agent_id=RAMEN, company_id="COMPANY-A", item_id="RAMEN"),
+            ForecastRecord(agent_id=SNACK, company_id="COMPANY-A", item_id="SNACK"),
+        ]
     )
 
 
-def run(store, item_id, assumptions, rationale=None):
-    return run_forecast_select_and_allocate(
-        store, "forecast", "supply_coordination", "COMPANY-A", item_id, assumptions, rationale
+async def run(store, item_id, assumptions, rationale=None):
+    """제출하고 검증agent와 supply_coordination까지 처리해, 만들어진 allocation_candidate(없으면 None)를 반환한다."""
+    await run_forecast_select_and_submit(
+        store, "forecast", "COMPANY-A", item_id, assumptions, rationale
     )
+    candidates = validate_and_allocate(store)
+    return candidates[0] if candidates else None
 
 
 def split_assumptions():
@@ -102,8 +93,8 @@ async def test_no_computed_assumption_sends_nothing_to_supply_coordination_or_va
 
     assert store.get_field("supply_coordination", "allocation_candidates") == []
     assert store.queue("allocation_candidates").empty()
-    assert store.queue("validation").empty()  # 검증agent 일감이 만들어지지 않는다
-    assert store.queue("escalation_records").qsize() == 1  # human_manager가 반응할 신호만 간다
+    assert store.queue("forecast_validation").empty()  # 검증agent 일감이 만들어지지 않는다
+    assert store.queue("human_manager").qsize() == 1  # human_manager가 반응할 신호만 간다
 
 
 async def test_other_instances_proceed_while_one_instance_is_held():
@@ -140,7 +131,7 @@ async def test_rerunning_with_the_same_snapshot_does_not_duplicate_the_open_reco
     await run(store, "RAMEN", [])
 
     assert len(store.get_field("forecast", "escalation_records")) == 1
-    assert store.queue("escalation_records").qsize() == 1
+    assert store.queue("human_manager").qsize() == 1
 
 
 async def test_same_reason_for_a_different_instance_is_a_separate_record():
@@ -267,16 +258,16 @@ async def test_unresolved_selection_opens_a_record_keeps_the_median_and_does_not
     (escalation,) = store.get_field("forecast", "escalation_records")
     assert escalation.reason == "selection_unresolved" and escalation.agent_id == RAMEN
     assert escalation.mode == "intervention" and escalation.status == "open" and escalation.rationale
-    events = [e.event for e in store.get_field("forecast", "negotiation_log")]
-    assert events == ["scenario_decided_median"]
+    events = [e.event for e in store.negotiation_log("forecast")]
+    assert events == ["scenario_decided"]
 
 
 async def test_a_clear_leader_does_not_open_a_record_even_if_values_differ_a_lot():
     store = make_store()
-    clear_leader = [
+    clear_leader = distinct([
         Assumption(assumption_id="a", value=100.0, forecast_uncertainty=5.0),
         Assumption(assumption_id="b", value=150.0, forecast_uncertainty=30.0),
-    ]
+    ])
 
     candidate = await run(store, "RAMEN", clear_leader)
 
@@ -293,16 +284,14 @@ async def test_rerunning_an_unresolved_selection_does_not_duplicate_the_record()
     assert [e.reason for e in store.get_field("forecast", "escalation_records")] == ["selection_unresolved"]
 
 
-async def test_different_reasons_for_the_same_instance_are_separate_records():
+async def test_a_different_reason_for_an_instance_that_is_already_held_is_not_added():
     store = make_store()
 
     await run(store, "RAMEN", split_assumptions())
-    await run(store, "RAMEN", [])
+    await run(store, "RAMEN", [])  # 보류 중인 인스턴스는 실행하지 않는다
 
-    assert [e.reason for e in store.get_field("forecast", "escalation_records")] == [
-        "selection_unresolved",
-        "no_computable_assumption",
-    ]
+    assert [e.reason for e in store.get_field("forecast", "escalation_records")] == ["selection_unresolved"]
+    assert record_of(store, 0).scenario is not None  # 기록도 그대로다
 
 
 # --- options_exhausted: escalation 기록을 만드는 함수가 받을 수 있게만 한다 -----------------------
@@ -313,13 +302,15 @@ def test_the_record_factory_accepts_options_exhausted():
     assert record.reason == "options_exhausted" and record.mode == "intervention" and record.status == "open"
 
 
-async def test_open_forecast_escalation_accepts_options_exhausted():
+async def test_a_hold_of_any_reason_makes_the_record_wait_for_a_human():
+    from validation_fixtures import open_hold
+
     store = make_store()
 
-    record = open_forecast_escalation(store, "forecast", RAMEN, "options_exhausted", "보강할 데이터가 더 없음")
+    open_hold(store, RAMEN, "options_exhausted", "보강할 데이터가 더 없음")
 
-    assert record is not None
     assert [r.reason for r in store.get_field("forecast", "escalation_records")] == ["options_exhausted"]
+    assert store.queue("human_manager").qsize() == 1
 
 
 # --- interaction_protocol: selection_unresolved 항목만 있다 ---------------------------------------

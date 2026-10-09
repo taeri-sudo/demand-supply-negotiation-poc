@@ -180,7 +180,7 @@ def test_ci_containing_zero_excludes_the_assumption_and_records_the_driver_and_a
     assert ids(calculated.assumptions) == [DEFAULT_ID]
     (record,) = check.excluded_drivers
     assert record.driver == "category_trend" and record.assumption_ids == [TREND_ID]
-    assert record.reason == "no_significant_effect" and record.rationale
+    assert record.reasons == ["no_significant_effect"] and record.rationale
     assert any(j.judgment["decision"] == "no_significant_effect" for j in check.judgments)
     stored = ForecastRecord(
         agent_id="CUST-01:ITEM-1", company_id="CUST-01", item_id="ITEM-1", excluded_drivers=check.excluded_drivers
@@ -194,7 +194,7 @@ def test_unavailable_market_evidence_is_reported_and_excludes_the_assumption():
     assert collection.evidence_status[("market", "category")] == "unavailable"
     assert collection.evidence_status[("pos", "same_item")] == "collected"
     assert ids(calculated.assumptions) == [DEFAULT_ID]
-    assert check.excluded_drivers[0].reason == "no_evidence"
+    assert check.excluded_drivers[0].reasons == ["no_evidence"]
 
 
 def test_collected_evidence_is_recorded_in_data_sources_but_not_requested_evidence_is_not():
@@ -234,7 +234,7 @@ def test_premise_without_records_is_dropped_from_every_assumption_and_the_reason
 
     assert check.premises == []
     (record,) = [r for r in check.excluded_drivers if r.driver == "event"]
-    assert record.reason == "no_evidence" and set(record.assumption_ids) == {DEFAULT_ID, TREND_ID}
+    assert record.reasons == ["no_evidence"] and set(record.assumption_ids) == {DEFAULT_ID, TREND_ID}
     assert record.rationale
     assert ids(calculated.assumptions) == [DEFAULT_ID, TREND_ID]  # 가정은 제외되지 않는다
 
@@ -284,7 +284,7 @@ def test_assumption_without_any_applicable_method_is_excluded_with_the_reason(mo
 
     assert calculated.assumptions == []
     assert {e.assumption_id for e in calculated.excluded_assumptions} == {DEFAULT_ID, TREND_ID}
-    assert all(e.reason == "no_applicable_method" and e.rationale for e in calculated.excluded_assumptions)
+    assert all(e.reasons == ["no_applicable_method"] and e.rationale for e in calculated.excluded_assumptions)
 
 
 # --- 가정 안: 기법별 값을 합치거나 하나 선택 ----------------------------------------------------------
@@ -355,7 +355,7 @@ def test_default_assumption_falls_back_to_the_order_history_when_no_method_can_r
     assert retried[0].judgment["regressors"] == ["event"] and retried[-1].judgment["regressors"] == []  # 전제 없이 다시 계산
     (record,) = calculated.excluded_drivers
     assert record.driver == "event" and record.assumption_ids == [DEFAULT_ID]
-    assert record.reason == "no_applicable_method" and "전제" in record.rationale
+    assert record.reasons == ["no_applicable_method"] and "전제" in record.rationale
     marks = [j for j in calculated.judgments if j.judgment.get("decision") == "premise_not_reflected"]
     assert len(marks) == 1 and marks[0].ambiguous and marks[0].ambiguity_reason
     assert marks[0].judgment["assumption_id"] == DEFAULT_ID
@@ -365,7 +365,7 @@ def test_default_assumption_falls_back_to_the_order_history_when_no_method_can_r
         agent_id="CUST-01:ITEM-1", company_id="CUST-01", item_id="ITEM-1",
         excluded_drivers=[*check.excluded_drivers, *calculated.excluded_drivers],
     )
-    assert stored.excluded_drivers[0].reason == "no_applicable_method"
+    assert stored.excluded_drivers[0].reasons == ["no_applicable_method"]
 
 
 def test_default_assumption_without_a_reflected_premise_is_not_marked_when_the_premise_is_reflected():

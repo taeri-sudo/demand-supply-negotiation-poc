@@ -1,16 +1,17 @@
 """`forecast->human_manager` 엣지: forecast가 사람 escalation 기록을 `escalation_records`에 만드는 경로.
 
-escalation 기록을 만드는 경우는 세 가지뿐이고 모두 `mode: "intervention"`, `status: "open"`으로 시작한다
-(AGENT_NODE_LIST.md "사람 escalation 세 경우").
+escalation 기록을 만드는 경우는 여섯 가지뿐이고 모두 `mode: "intervention"`, `status: "open"`으로 시작한다
+(AGENT_NODE_LIST.md "사람 escalation 세 경우", "다음 agent 선택 escalation 두 경우", "실행 실패").
 
 - `no_computable_assumption`: 계산된 가정이 하나도 없어 요청량을 만들 수 없음(`scenario`는 `null`)
 - `selection_unresolved`: 가정 선택 ③(`scenario`에 규칙이 낸 중간값)
-- `options_exhausted`: send-back 전에 계산된 `scenario`가 있었는데 재실행으로 가정이 모두 제외됨. 이 모듈은
-  escalation 기록을 만드는 함수가 이 reason을 받을 수 있게만 한다(재실행은 아직 구현돼 있지 않다)
+- `options_exhausted`: 재실행 전에 계산된 `scenario`가 있었는데 재실행으로 가정이 모두 제외됨
+- `forecast_run_error`: forecast 실행(첫 실행·재실행)이 예외로 끝남(기록은 이전 값 그대로)
+- `no_next_agent`: `passed` 뒤에 넘길 후보 agent가 없음(기록의 값은 그대로, `forward_to` 없음)
+- `multiple_next_agents`: 후보가 여럿이라 고르지 못함(M7 전까지)
 
-같은 인스턴스·같은 `reason`의 처리되지 않은(open) escalation 기록이 있으면 새로 만들지 않는다. 처리되지 않은
-escalation 기록이 있는 동안 그 인스턴스는 supply_coordination으로 요청량을 보내지 않는다(`has_open_escalation`).
-사람이 처리한 뒤의 동작은 M4다. `interaction_protocol`에는 `selection_unresolved` 항목만 있고
+처리되지 않은 escalation 기록이 있는 인스턴스는 "사람 대기" 상태라 실행하지 않고, 검증agent도 supply_coordination도 그 기록에
+일하지 않는다(`record_state.py`). 사람이 처리한 뒤의 동작은 M4다. `interaction_protocol`에는 `selection_unresolved` 항목만 있고
 (`selection_unresolved_protocol_entry`), 조회 키는 `(edge, escalation_trigger)`다.
 """
 
@@ -18,16 +19,21 @@ from typing import Literal
 
 from .access import StateStore
 from .data_source_judgment import DataCollectionResult
+from .escalation_records import OPEN_STATUS
 from .ids import now_iso
 from .logging_utils import log
 from .state import EscalationRecord, ExcludedAssumption, InteractionProtocol
 
 ESCALATION_EDGE = "forecast->human_manager"
-ForecastEscalationReason = Literal["no_computable_assumption", "selection_unresolved", "options_exhausted"]
-OPEN_STATUS = "open"
+ForecastEscalationReason = Literal[
+    "no_computable_assumption", "selection_unresolved", "options_exhausted", "forecast_run_error",
+    "no_next_agent", "multiple_next_agents",
+]
 
 
-def new_forecast_escalation(agent_id: str, reason: ForecastEscalationReason, rationale: str) -> EscalationRecord:
+def new_forecast_escalation(
+    agent_id: str, reason: ForecastEscalationReason, rationale: str, log_seq: int | None = None
+) -> EscalationRecord:
     """사람의 결정을 기다리는 `intervention` escalation 기록 하나를 만든다. State에 쓰는 일은 호출부가 한다."""
     return EscalationRecord(
         agent_id=agent_id,
@@ -35,6 +41,7 @@ def new_forecast_escalation(agent_id: str, reason: ForecastEscalationReason, rat
         reason=reason,
         rationale=rationale,
         mode="intervention",
+        log_seq=log_seq,
         status=OPEN_STATUS,
     )
 
@@ -46,23 +53,6 @@ def has_open_escalation(records: list[EscalationRecord], agent_id: str, reason: 
         and (reason is None or r.reason == reason)
         for r in records
     )
-
-
-def open_forecast_escalation(
-    store: StateStore, role_tag: str, agent_id: str, reason: ForecastEscalationReason, rationale: str
-) -> EscalationRecord | None:
-    """escalation 기록을 `escalation_records`에 만든다.
-
-    같은 인스턴스·같은 reason의 처리되지 않은(open) escalation 기록이 있으면 아무것도 하지 않고 None을 반환한다.
-    """
-    records = store.get_field(role_tag, "escalation_records")
-    if has_open_escalation(records, agent_id, reason):
-        log(role_tag, "open_forecast_escalation", agent_id=agent_id, reason=reason, duplicate=True)
-        return None
-    record = new_forecast_escalation(agent_id, reason, rationale)
-    store.set_field(role_tag, "escalation_records", [*records, record], notify_channel="escalation_records")
-    log(role_tag, "open_forecast_escalation", agent_id=agent_id, reason=reason)
-    return record
 
 
 def no_computable_rationale(
@@ -81,8 +71,8 @@ def no_computable_rationale(
 
 def options_exhausted_rationale(excluded_assumptions: list[ExcludedAssumption]) -> str:
     """재실행으로 가정이 모두 제외돼 요청량을 더 만들 수 없는 이유를 사람이 읽는 설명으로 모은다."""
-    parts = [f"가정 '{e.assumption_id}' 제외({e.reason}): {e.rationale}" for e in excluded_assumptions]
-    return "send-back 재실행으로 가정이 모두 제외됨" + (f" — {'; '.join(parts)}" if parts else "")
+    parts = [f"가정 '{e.assumption_id}' 제외({', '.join(e.reasons)}): {e.rationale}" for e in excluded_assumptions]
+    return "재실행으로 가정이 모두 제외됨" + (f" — {'; '.join(parts)}" if parts else "")
 
 
 def selection_unresolved_protocol_entry() -> InteractionProtocol:

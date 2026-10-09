@@ -18,10 +18,10 @@ M7에서 LLM이 외부 정보로 이어받는다(같은 반환 스키마).
 (`MAX_DRIVERS_PER_ASSUMPTION`, `MAX_ASSUMPTIONS_FOR_SELECTION`). 가정 ID는 의미 있는 고정 문자열이다
 (같은 입력이면 같은 결과 — 결정론).
 
-**send-back 재실행**: `assumption` send-back 이유를 받으면 `redefine_assumptions`가 `assumption_id`의 가정을 다시 정의한다.
-send-back 이유가 문제가 된 원인(driver)을 지목하지 못하므로 그 가정의 원인을 모두 제외하고(`excluded_drivers`에 send-back
-이유로 기록), 원인이 없어진 가정은 수단이 없어 제외한다(`excluded_assumptions`에 send-back 이유로 기록). 원인이
-처음부터 없는 기본 가정도 같다.
+**재실행**: `assumption` 의심되는 원인을 받으면 `redefine_assumptions`가 `assumption_id`의 가정을 다시 정의한다.
+`drivers`가 있으면 지목한 원인만, null이면 그 가정의 모든 원인을 제외하고(`excluded_drivers`에 의심되는 원인으로 기록),
+원인이 하나도 남지 않은 가정은 수단이 없어 제외한다(`excluded_assumptions`에 의심되는 원인으로 기록). 원인이 처음부터
+없는 기본 가정도 같다. 한 가정에 이유가 여러 개면 모두 적용한다.
 """
 
 from dataclasses import dataclass, field
@@ -39,7 +39,7 @@ from .state import (
     ExcludedAssumption,
     ExcludedDriver,
     SuspectedCause,
-    send_back_reason,
+    suspected_cause_reason,
 )
 
 ROLE_TAG = "forecast"
@@ -112,52 +112,87 @@ def define_assumptions(inputs: InstanceInputs, scheduled_promotion: bool = False
 @dataclass
 class Redefinition:
     definition: AssumptionDefinition
-    excluded_assumptions: list[ExcludedAssumption]  # 원인이 없어져 수단이 없는 가정(send-back 이유를 제외 이유로 기록)
-    excluded_drivers: list[ExcludedDriver]  # 제외한 원인(send-back 이유를 제외 이유로 기록)
+    excluded_assumptions: list[ExcludedAssumption]  # 원인이 없어져 수단이 없는 가정(의심되는 원인을 제외 이유로 기록)
+    excluded_drivers: list[ExcludedDriver]  # 제외한 원인(의심되는 원인을 제외 이유로 기록)
 
 
-def redefine_assumptions(definition: AssumptionDefinition, cause: SuspectedCause) -> Redefinition:
-    """`assumption` send-back 이유를 받아 `assumption_id`의 가정을 다시 정의한다.
+def _covers(cause: SuspectedCause, driver: Driver) -> bool:
+    """의심되는 원인이 이 원인을 제외하라고 하는가. `drivers`가 null이면 그 가정의 모든 원인이다."""
+    return cause.drivers is None or driver.driver in cause.drivers
 
-    send-back 이유가 문제가 된 원인을 지목하지 못하므로 그 가정의 원인을 모두 제외한다. 원인이 없어진 가정(원인이 처음부터
-    없는 기본 가정 포함)은 기본 가정과 같은 구성이거나 뺄 원인이 없어 대응할 수단이 없으므로 제외한다. 다시 정의한
-    결과의 필요한 근거 목록도 새로 만든다.
+
+def redefine_assumptions(definition: AssumptionDefinition, causes: list[SuspectedCause]) -> Redefinition:
+    """`assumption` 의심되는 원인들을 받아 `assumption_id`의 가정을 다시 정의한다.
+
+    이유의 `drivers`가 있으면 지목한 원인만, null이면 그 가정의 모든 원인을 제외한다. 한 원인이나 가정을 제외하게 한 이유가 여럿이면
+    모두 제외 이유 목록에 기록한다. 원인이 하나도 남지 않은 가정(원인이 처음부터 없는 기본 가정 포함)은
+    기본 가정과 같은 구성이거나 뺄 원인이 없어 대응할 수단이 없으므로 제외한다. 다시 정의한 결과의 필요한 근거 목록도
+    새로 만든다.
     """
-    if cause.type != "assumption" or cause.assumption_id is None:
-        raise ValueError("assumption send-back 이유에는 assumption_id가 필요함")
-    target = next((a for a in definition.assumptions if a.assumption_id == cause.assumption_id), None)
-    if target is None:
-        raise ValueError(f"send-back 이유가 가리키는 가정 {cause.assumption_id!r}이 정의에 없음")
+    by_assumption: dict[str, list[SuspectedCause]] = {}
+    for cause in causes:
+        if cause.type != "assumption" or cause.assumption_id is None:
+            raise ValueError("assumption 의심되는 원인에는 assumption_id가 필요함")
+        by_assumption.setdefault(cause.assumption_id, []).append(cause)
+    known = {a.assumption_id for a in definition.assumptions}
+    for assumption_id in by_assumption:
+        if assumption_id not in known:
+            raise ValueError(f"의심되는 원인이 가리키는 가정 {assumption_id!r}이 정의에 없음")
 
-    reason = send_back_reason(cause)
-    excluded_drivers = [
-        ExcludedDriver(
-            driver=d.driver,
-            assumption_ids=[target.assumption_id],
-            reason=reason,
-            rationale=f"{reason} send-back이 원인을 지목하지 못해 가정 '{target.assumption_id}'의 원인을 모두 제외",
+    excluded_drivers: list[ExcludedDriver] = []
+    excluded_assumptions: list[ExcludedAssumption] = []
+    kept: list[Assumption] = []
+    judgments: list[StructuredJudgment] = []
+    for assumption in definition.assumptions:
+        own = by_assumption.get(assumption.assumption_id)
+        if own is None:
+            kept.append(assumption)
+            continue
+        remaining: list[Driver] = []
+        removed: list[Driver] = []
+        for driver in assumption.drivers:
+            first = next((c for c in own if _covers(c, driver)), None)
+            if first is None:
+                remaining.append(driver)
+                continue
+            removed.append(driver)
+            covering = list(dict.fromkeys(suspected_cause_reason(c) for c in own if _covers(c, driver)))
+            how = "지목한 원인" if first.drivers is not None else "원인을 지목하지 못해 모든 원인"
+            excluded_drivers.append(
+                ExcludedDriver(
+                    driver=driver.driver,
+                    assumption_ids=[assumption.assumption_id],
+                    reasons=covering,
+                    rationale=f"{', '.join(covering)} 의심되는 원인이 {how}으로 가정 '{assumption.assumption_id}'에서 제외",
+                )
+            )
+        reasons = list(dict.fromkeys(suspected_cause_reason(c) for c in own))
+        if remaining:
+            kept.append(assumption.model_copy(update={"drivers": remaining}))
+            note = f"가정 '{assumption.assumption_id}'에서 원인 {[d.driver for d in removed]}을 제외하고 다시 정의"
+        else:
+            if not assumption.drivers:
+                note = f"가정 '{assumption.assumption_id}'은 원인이 없는 기본 가정이라 제외할 원인이 없어 수단이 없음"
+            else:
+                note = f"가정 '{assumption.assumption_id}'의 원인 {[d.driver for d in assumption.drivers]}을 모두 제외하면 원인이 없어 수단이 없음"
+            excluded_assumptions.append(
+                ExcludedAssumption(assumption_id=assumption.assumption_id, reasons=reasons, rationale=note)
+            )
+        judgments.append(
+            StructuredJudgment(
+                judgment={"decision": "assumption_redefined", "assumption_id": assumption.assumption_id,
+                          "send_back": reasons, "excluded_drivers": [d.driver for d in removed],
+                          "excluded": not remaining},
+                reasoning=note,
+            )
         )
-        for d in target.drivers
-    ]
-    note = (
-        f"가정 '{target.assumption_id}'은 원인이 없는 기본 가정이라 제외할 원인이 없어 수단이 없음"
-        if not target.drivers
-        else f"가정 '{target.assumption_id}'의 원인 {[d.driver for d in target.drivers]}을 모두 제외하면 원인이 없어 수단이 없음"
-    )
-    excluded_assumptions = [ExcludedAssumption(assumption_id=target.assumption_id, reason=reason, rationale=note)]
-    kept = [a for a in definition.assumptions if a.assumption_id != target.assumption_id]
     premises = list(definition.premises)
-    judgment = StructuredJudgment(
-        judgment={"decision": "assumption_redefined", "assumption_id": target.assumption_id, "send_back": reason,
-                  "excluded_drivers": [d.driver for d in target.drivers], "excluded": True},
-        reasoning=note,
-    )
-    log(ROLE_TAG, "redefine_assumptions", assumption_id=target.assumption_id, send_back=reason,
+    log(ROLE_TAG, "redefine_assumptions", assumption_ids=list(by_assumption), causes=[suspected_cause_reason(c) for c in causes],
         kept=[a.assumption_id for a in kept])
     return Redefinition(
         definition=AssumptionDefinition(
             assumptions=kept, premises=premises, required_evidence=required_evidence_for(kept, premises),
-            judgments=[*definition.judgments, judgment],
+            judgments=[*definition.judgments, *judgments],
         ),
         excluded_assumptions=excluded_assumptions,
         excluded_drivers=excluded_drivers,

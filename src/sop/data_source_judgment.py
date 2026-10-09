@@ -27,7 +27,7 @@ AGENT_NODE_LIST.md의 이 단계를 구현한다. 한 인스턴스((회사, item
 원인이 있는 가정을 제외한다. 수집한 근거는 `data_sources`에 기록돼 가정의 `evidence`가 스냅샷 안에 있는지
 확인할 수 있다. 기록 없는 상승 구간을 같은 시기 시장 흐름과 비교하는 판단은 이번 범위가 아니다.
 
-**send-back 재실행**: 데이터 수집부터 다시 도는 send-back 이유는 `SourceAdjustments`로 들어온다. 소스를 제외하고
+**재실행**: 데이터 수집부터 다시 도는 의심되는 원인은 `SourceAdjustments`로 들어온다. 소스를 제외하고
 (`exclude`, 이유는 `irrelevant` 또는 `contaminated`), 소스를 어느 날짜부터 쓰게 하고(`use_from`), 이력이
 기준을 채웠어도 대상 가정만 보강을 시도하게 한다(`force_supplement`). 같은 입력과 같은 조정이면 같은 결과다.
 
@@ -71,7 +71,7 @@ MIN_FIT_ERROR = 0.05  # 보강 가중에서 오차가 이보다 작아도 이 �
 
 @dataclass
 class SourceAdjustments:
-    """send-back 이유가 데이터 수집에 거는 조정. State의 `excluded_sources`와 `data_sources[].use_from`에 남는다."""
+    """의심되는 원인이 데이터 수집에 거는 조정. State의 `excluded_sources`와 `data_sources[].use_from`에 남는다."""
 
     exclude: dict[SourceKey, Literal["irrelevant", "contaminated"]] = field(default_factory=dict)
     use_from: dict[SourceKey, date] = field(default_factory=dict)
@@ -360,7 +360,7 @@ def _collect_required_evidence(
         label = f"{key[0]}/{key[1]}"
         if adjustments is not None and key in adjustments.exclude:
             status[key] = "unavailable"
-            judgments.append(_judgment("evidence_unavailable", f"{label}: send-back 이유({adjustments.exclude[key]})로 제외한 소스라 수집하지 않음", source=label))
+            judgments.append(_judgment("evidence_unavailable", f"{label}: 의심되는 원인({adjustments.exclude[key]})로 제외한 소스라 수집하지 않음", source=label))
             continue
         if key == ("orders", "same_item"):
             status[key], series[key] = "collected", base
@@ -417,7 +417,7 @@ def collect_instance_data(
     """데이터 수집과 소스 판단. 상태(State)는 건드리지 않고 결과를 반환한다.
 
     `required_evidence`는 가정 정의가 선언한 근거 목록이다. 근거마다 수집하고, 수집할 수
-    없으면 오류 대신 `evidence_status`에 "unavailable"로 돌려준다. `adjustments`는 send-back 재실행이
+    없으면 오류 대신 `evidence_status`에 "unavailable"로 돌려준다. `adjustments`는 재실행이
     거는 소스 조정이다. `assumption_sources`는 가정 ID별로 그 가정의 원인·전제가 근거로 삼는 소스이며, 이 소스를
     가장 먼저 써서 가정마다 따로 보강한다(`training_by_assumption`).
     """
@@ -469,7 +469,7 @@ def collect_instance_data(
     adjusted_from = adjustments.use_from.get(("orders", "same_item"))
     if adjusted_from is not None:
         judgments.append(
-            _judgment("outdated_send_back_use_from", f"send-back 이유로 주문을 {adjusted_from}부터 사용", source="orders/same_item", issue="outdated", use_from=str(adjusted_from))
+            _judgment("outdated_use_from_applied", f"의심되는 원인으로 주문을 {adjusted_from}부터 사용", source="orders/same_item", issue="outdated", use_from=str(adjusted_from))
         )
     orders_cut = [
         d for d in (promo_use_from, first_use_from, pd.Timestamp(adjusted_from) if adjusted_from else None) if d is not None
@@ -528,7 +528,7 @@ def collect_instance_data(
         backcast, used = _fill_backcast(base, fitted, frozenset(), months) if short else (pd.Series(dtype=float), [])
         fills = {}
         for assumption_id, own in (assumption_sources or {}).items():
-            if assumption_id in force:  # send-back의 대상 가정은 값이 있는 달까지 끝까지 보강한다
+            if assumption_id in force:  # 재실행의 대상 가정은 값이 있는 달까지 끝까지 보강한다
                 fills[assumption_id] = _fill_backcast(base, fitted, own, None)
             elif short:
                 fills[assumption_id] = _fill_backcast(base, fitted, own, months)
@@ -538,7 +538,7 @@ def collect_instance_data(
                 training_by_assumption[assumption_id] = pd.concat([fill, base])
         used = [k for k in fitted if k in set(used) | {u for _, keys in fills.values() for u in keys}]
         if any(len(fills[assumption_id][0]) == 0 for assumption_id in force if assumption_id in fills):
-            judgments.append(_judgment("no_additional_supplement", f"send-back 이유로 보강을 시도했으나 이력 {len(base)}개월 앞쪽에 더 얹을 보강 데이터가 없는 가정이 있음", months=len(base)))
+            judgments.append(_judgment("no_additional_supplement", f"의심되는 원인으로 보강을 시도했으나 이력 {len(base)}개월 앞쪽에 더 얹을 보강 데이터가 없는 가정이 있음", months=len(base)))
         if short and len(backcast) == 0:
             needs_human = True
             human_reason = f"이력 {len(base)}개월로 부족한데 보강에 쓸 수 있는 데이터가 없음"
@@ -562,7 +562,7 @@ def collect_instance_data(
     evidence_status, evidence_series = _collect_required_evidence(
         inputs, required_evidence or [], last_month, promo_use_from, base, data_sources, judgments, adjustments
     )
-    for key, reason in adjustments.exclude.items():  # send-back 이유로 제외한 소스는 항상 남긴다
+    for key, reason in adjustments.exclude.items():  # 의심되는 원인으로 제외한 소스는 항상 남긴다
         excluded_sources = [e for e in excluded_sources if (e.kind, e.item_scope) != key]
         excluded_sources.append(ExcludedSource(kind=key[0], item_scope=key[1], refs=_refs_for(inputs, key), reason=reason))
     for key, day in adjustments.use_from.items():  # 소스를 쓰기 시작하는 날짜를 남긴다

@@ -18,8 +18,6 @@ async def adjust_capacity_pool(
     pool_id: str,
     delta: float,
     reason: str,
-    *,
-    notify_channel: str,
 ) -> None:
     async with store.lock(f"capacity_pools:{pool_id}"):
         pools = store.get_field(role_tag, "capacity_pools")
@@ -35,5 +33,5 @@ async def adjust_capacity_pool(
             }
         )
         store.set_field(
-            role_tag, f"capacity_pools[{index}]", updated, notify_channel=notify_channel
+            role_tag, f"capacity_pools[{index}]", updated
         )
