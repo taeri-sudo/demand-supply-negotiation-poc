@@ -10,18 +10,20 @@ agent/노드별 역할, 내부 단계, 판단 유형, 입력을 정리한다. St
 forecast agent((회사,item) 인스턴스별 1개, 총 N개, role_tag: forecast) — 지속 태스크
    (가정 정의→데이터 수집·소스 판단→통계기법 선택→가정별 요청량 예측값 계산→
     가정 선택을 한 agent 내부 단계로 수행)
-        ↕  (신호 기반, 평소 정방향 최적화 / 예외 시에만 역방향 send-back)
+        ↓  예측 수요 전달(신호 기반) — 예외 시에만 역방향 send-back
 supply_coordination agent(1개, role_tag: supply_coordination) — 지속 태스크
-   ↕procurement_plan   ↕production_plan   ↕logistics_plan  (각 1개, 지속 태스크)
-   (hub-and-spoke — 셋 다 직접 연결, 사슬 아님. 순서는 의존관계에 따른
-    호출 순서일 뿐, 건너뛰기/역방향 send-back 모두 구조적으로 가능)
+   (생산라인마다 예측 수요·수주·사람이 정한 수량을 계약 조건과 공급 가능량 안에서
+    배분해 결론을 allocations에 씀)
+        ↕  (M5) 회의(meetings)로 procurement_plan · production_plan · logistics_plan
+            (각 1개, 지속 태스크)과 연결 — 참여 agent가 서로의 기록을 보고 판단
         ↓
-실제 조달/생산/배송 (그래프 노드 아님, 외부 경계 — sales_channel과 같은 성격)
+sales_channel(외부 경계)이 완료된 allocations를 읽어 감 / 실제 조달·생산·배송(외부 경계)
 
-validation agent(들) — 이벤트 트리거·무기억 워커풀 방식으로 일하고,
+validation agent(들) — 이벤트 트리거·무기억 워커풀. agent가 맡은 일이 끝났을 때
 판정(`passed`/`failed`/`error`)만 State에 쓴다. 기록이 "판정됨" 상태가 되면 작성agent의
-채널(작성agent의 `role_tag`)로 신호가 간다 — 라우팅 권한은 없고
-다음 agent에게 전달하지 않는다. human_manager(들) — escalation 발생 시 반응(알림은 받기만 함), 지속 태스크 아님.
+채널(작성agent의 `role_tag`)로 신호가 간다 — 라우팅 권한은 없고 다음 agent에게 전달하지 않는다.
+human_manager(업무 판단) · system_operator(시스템 오류) — escalation 발생 시 반응
+(알림은 받기만 함), 지속 태스크 아님.
 
 문제 발생 시: 공급망계획agent → supply_coordination → (필요시) forecast/
 채널/사람 escalation — 어디까지 send-back 또는 escalation할지는 interaction_protocol이 규정.
@@ -60,15 +62,14 @@ asyncio 태스크로 서로 안 막히고 진행, "이벤트 워커풀"은 트�
   `null`(기록 없음) 세 가지 상태다 — 원본에 값이 비어 있는 기간을 `false`로 채우지 않는다.
 - 프로모션: 과거 프로모션 이력(위 표시) + 예정된 **프로모션 일정**(언제, 어느 고객사·item에 — 수량은 받지 않음).
 - 고객사별 **계약 조건** 중 최소 구매 약정(구속력 여부 포함)은 supply_coordination이 입력으로 받아
-  배분에서 처리한다(아래 supply_coordination 절). 결품 위약률은 비용 기반 요청량 결정의 입력이다(아래
-  "원가 입력"). 조율을 거쳐 납품된 주문은 다음 주기의 주문 이력이 되어 forecast의 근거가 된다(약정 이행 여부도 이 이력으로 확인).
+  배분에서 처리한다(아래 supply_coordination 절). 결품 위약률은 원가 입력의 하나다(아래 "원가 입력"). 조율을 거쳐 납품된 주문은 다음 주기의 주문 이력이 되어 forecast의 근거가 된다(약정 이행 여부도 이 이력으로 확인).
 - 신제품은 시장 데이터(`market`)를 중심으로 보고, 우리 유사 제품 데이터(`orders`/`pos` + `similar_item`)는 보조로 쓴다.
 - **시장 데이터 처리**: 금액(매출액) 기준이므로 **변화율**로 쓰고, 제품군별
   소비자물가지수로 **물가를 보정**한다(변화율이 우리 수량에 적용되므로 가정·
   보강 모두에 적용). 원본 매출액은 그대로 두고 보정값은 계산 결과로
   따로 만든다. 데이터 보강에 쓸 때만 우리 주문 규모로 맞춘다(흐름의 모양을
   가져와 우리 수준으로 조정). 상품군별 INA-R 그룹 매핑과 우리 매출 포함 여부에 따른 처리는 "외부 경계" 참고.
-- **원가 입력**(비용 기반 요청량 결정에 쓰는 값. 값과 계산식은 `cost_inputs.py`에 있다). 원본은 아래 값이고, 과잉·부족 비용은
+- **원가 입력**(forecast는 쓰지 않는다. supply_coordination의 1개당 마진과 production_plan의 준비량(M5)에 쓰는 값이고, 값과 계산식은 `cost_inputs.py`에 있다). 원본은 아래 값이고, 과잉·부족 비용은
   여기서 계산한다. 원가는 기간에 따라 바뀌므로 **적용 기간별 값**으로 두고,
   계획 주기마다 그 시점에 유효한 값을 쓴다(`{업종, 적용 시작일, 공급가, 제조원가}`):
 
@@ -164,8 +165,8 @@ asyncio 태스크로 서로 안 막히고 진행, "이벤트 워커풀"은 트�
 
 **기록 쓰기**: forecast는 한 번 실행하는 동안(재실행 포함) `forecast_records`에 중간 결과를 쓰지 않는다. 5단계까지 계산해
 보류 여부가 정해진 뒤 기록을 한 번만 쓴다. 기록과 그 로그 항목을 `update_state`로 한 번의 State 갱신에 쓴다. 보류가 아니면 기록이 "검증 대기" 상태가 되어 검증agent에게 신호가
-가고, 보류이면 로그 항목, escalation 기록, 기록을 보류 전용 함수(`write_held`, 역시 한 번의 `update_state`)로 쓰며 기록이 "사람 대기"
-상태가 되어 human_manager에게 신호가 간다(GRAPH_FLOW.md "신호 규칙").
+가고, 보류이면 로그 항목, escalation 기록, 기록을 보류 전용 함수(`write_held`, 역시 한 번의 `update_state`)로 쓰며 기록이 "업무 대기"
+(`human_manager` 담당 reason) 또는 "시스템 대기"(`system_operator` 담당 reason) 상태가 되어 담당에게 신호가 간다(GRAPH_FLOW.md "신호 규칙").
 
 **재실행** (용어는 GRAPH_FLOW.md "send-back·재실행 관련 용어" 참고) — send-back(`misrouted` 제외)이나 불합격 판정을 받으면 재실행되는 판단 함수는
 의심되는 원인 목록(`suspected_causes`)과 덮어쓰기 전 직전 결과를 입력으로 받는다. 같은 스냅샷에서 입력이 같으면
@@ -219,67 +220,96 @@ asyncio 태스크로 서로 안 막히고 진행, "이벤트 워커풀"은 트�
 `multiple_next_agents` escalation이다(여럿일 때의 LLM 판단은 M7). `misrouted` 반송을 받아 다시 고를 때는 그 기록(같은 판정)에 대해 반송한
 agent를 후보에서 뺀다. 반송 이력은 반송한 agent의 로그(`misrouted_send_back`)에서 찾는다.
 
-**다음 agent 선택 escalation 두 경우** — `no_next_agent`와 `multiple_next_agents`도 `mode: "intervention"`이고 그 인스턴스의 기록이
-"사람 대기"가 된다. 기록의 값(`scenario`, 판정)은 그대로이고 `forward_to`는 비어 있다. 긴급도는 둘 다 `warning`이다(값은 있지만 어디로 넘길지
-확인이 필요함).
+**다음 agent 선택 escalation 두 경우** — `no_next_agent`와 `multiple_next_agents`는 카드 설정 문제라 `system_operator` 담당이다.
+`mode: "intervention"`이고 그 인스턴스의 기록이 "시스템 대기"가 된다. 기록의 값(`scenario`, 판정)은 그대로이고 `forward_to`는 비어 있다.
+긴급도는 둘 다 `warning`이고 시한은 없다(처리될 때까지 시스템 대기, STATE_SCHEMA.md 7번 절).
 
 **사람 escalation 세 경우** — forecast가 가정 선택까지의 판단 결과로 `escalation_records`에 escalation 기록을 만드는 경우는 아래 셋뿐이다(실행 자체가 예외로 끝나는 경우는 아래 "실행 실패"). 세 경우 모두
-`mode: "intervention"`이다(값이 없거나 사람의 결정이 필요해 알리고 진행할 수 없음).
+`human_manager` 담당이고 `mode: "intervention"`이다(값이 없거나 사람의 결정이 필요해 알리고 진행할 수 없음).
 
-| 경우 | `reason` | 발생 시점 | `scenario` |
-|---|---|---|---|
-| 계산된 가정이 하나도 없음(기본 가정까지 계산되지 않음, 사용할 주문이 없음, 또는 재실행 전에도 `scenario`가 없었음) | `no_computable_assumption` | 4단계 이후 | `null` |
-| 가정 선택 ③ | `selection_unresolved` | 5단계 | 규칙이 낸 중간값 |
-| 재실행으로 가정이 모두 제외됨(재실행 전에 `scenario`가 계산돼 있었음) | `options_exhausted` | 재실행 중 | 재실행 전에 계산된 값 그대로(`assumptions`도 그대로) |
+| 경우 | `reason` | 발생 시점 | `scenario` | 시한 초과 시 |
+|---|---|---|---|---|
+| 계산된 가정이 하나도 없음(기본 가정까지 계산되지 않음, 사용할 주문이 없음, 또는 재실행 전에도 `scenario`가 없었음) | `no_computable_assumption` | 4단계 이후 | `null` | 예측 수요 없이 진행(이번 주기 배분에서 빠짐) |
+| 가정 선택 ③ | `selection_unresolved` | 5단계 | 규칙이 낸 중간값 | 그 중간값으로 진행 |
+| 재실행으로 가정이 모두 제외됨(재실행 전에 `scenario`가 계산돼 있었음) | `options_exhausted` | 재실행 중 | 재실행 전에 계산된 값 그대로(`assumptions`도 그대로) | 재실행 전 값으로 진행 |
 
 - **보류 규칙**: 미처리 escalation 기록이 있는 인스턴스는 검증agent와 supply_coordination 어느 쪽에도 넘기지 않는다
   (GRAPH_FLOW.md "사람 입력과 검증의 무결성"). 다른 인스턴스는 그대로 진행한다(인스턴스가 서로 독립이기 때문).
 - 미처리 escalation 기록이 있는 인스턴스는 첫 실행을 포함해 **실행하지 않고** 건너뛴 사실만 forecast 로그에 남긴다
   (`forecast_run_skipped`). 그래서 같은 스냅샷에서 다시 돌려도 escalation 기록이 쌓이지 않고 forecast 기록도 바뀌지 않는다.
   escalation 기록의 `log_seq`는 보류에 들어갈 때 쓴 로그 항목을 가리킨다(STATE_SCHEMA.md 7번 절).
-- 사람이 처리한 뒤의 동작(`resolution`을 `scenario`로 반영, `selection_basis: "human"` 등)과 응답 시한은 M4에서
-  정한다(STATE_SCHEMA.md "아직 정하지 않은 것").
+- **사람이 처리하면**: 처리 함수가 요청량을 `scenario.value`에, `"human"`을 `selection_basis`에 쓰고 `validation`을 `passed`로 쓴다
+  (STATE_SCHEMA.md 7번 절 "사람의 처리"). 기록이 "판정됨"이 되어 forecast가 다음 agent 선택으로 넘긴다. 사람이 넣은 값은 넣을 때
+  입력 제한으로 확인하므로 검증agent를 다시 거치지 않는다.
+- **시한이 지나면**: 스케줄러의 신호를 받은 forecast가, 기록이 아직 `open`이고 시한이 지났으면 위 표의 처리를 하고 `status`를
+  `expired`로 쓴다(로그 `escalation_expired`). 값으로 진행하는 경우 반영 방식은 사람의 처리와 같고 `selection_basis`는 `"rule"`이다.
+  예측 수요 없이 진행하는 경우 기록의 `scenario`는 `null`로 남고 이번 주기 조율은 이 인스턴스를 기다리지 않는다.
 - 요청량 0은 계산된 정상 값이라 escalation이 아니다. `scenario.value = 0`과 `scenario = null`을 구분한다.
 
 **실행 실패** — forecast 실행(첫 실행·재실행)이 예외로 끝나는 시스템 장애 처리다. 판단 결과가 아니라 위 세 경우와 따로 둔다.
 - 예외가 나면 재시도 없이 바로 forecast 로그에 실패한 단계와 예외 내용을 `payload`로 남기고(`forecast_run_error`)
-  escalation 기록(`reason: "forecast_run_error"`, `mode: "intervention"`, `agent_id`는 그 인스턴스)을 만든다.
-  그 인스턴스만 멈추고 다른 인스턴스는 진행한다.
+  escalation 기록(`reason: "forecast_run_error"`, `target_role: "system_operator"`, `mode: "intervention"`, `agent_id`는 그 인스턴스)을
+  만든다. 그 인스턴스만 시스템 대기로 멈추고 다른 인스턴스는 진행한다.
 - State의 forecast 기록은 이전 값 그대로 둔다(기록은 실행이 끝난 뒤 한 번만 쓰므로 실패한 실행의 중간 결과가 남지 않는다).
   재실행이 실패하면 재실행 대상이던 이전 `validation`도 그대로다.
+- `system_operator`가 고친 뒤 `rerun`으로 처리하면 그 인스턴스를 다시 실행하고(첫 실행이었으면 첫 실행, 재실행이었으면 같은
+  의심되는 원인으로), `dismiss`로 처리하면 이번 주기에서 뺀다.
 
 ### supply_coordination agent (Agent, 1개, role_tag: `supply_coordination`)
-**카드**(`agent_cards`): `description`은 요청량을 우선순위에 따라 배분안으로 만드는 일, `accepts`는 "검증을 통과한 수요 예측", `produces`는 없음(plan
-agent 카드가 생기는 M5까지), `response_type`은 `optimization`(단방향 최적화), `known_agents`는 `[]`(plan agent 카드와 함께 M5에서 더한다).
-넘어온 기록이 자기 `accepts`와 맞지 않으면 `misrouted`로 되돌린다(GRAPH_FLOW.md "받는 쪽 반송").
+**카드**(`agent_cards`): `description`은 예측 수요·수주·사람이 정한 수량을 생산라인마다 계약 조건과 공급 가능량 안에서 배분하는 일,
+`accepts`는 "검증을 통과한 수요 예측", `produces`는 없음(plan agent 카드와 함께 M5에서 정한다 — 그 전까지는 배분 결론이 `passed`되면
+"완료"), `response_type`은 `optimization`(단방향 최적화), `known_agents`는 `[]`. 넘어온 기록이 자기 `accepts`와 맞지 않으면
+`misrouted`로 되돌린다(GRAPH_FLOW.md "받는 쪽 반송").
 
-- **후보안(allocation_candidates) 생성·선정** (Agent, 판단)
-- **우선순위 점수 산출** (함수 — 가중치 조정 등은 판단 여지 있음). "몇 번까지
-  기다릴지"(`max_rounds`, 안전장치)와 "누구부터/얼마나 배분할지"(우선순위)는
-  다른 문제다. 우선순위는 **동점 처리(tie-breaker) 순서**로 산출한다 — 4단이
-  매번 적용되는 게 아니라, 앞 기준에서 확실한 차이가 안 날 때만 다음 기준으로 내려감:
-  1. **매출/마진 임팩트** (주 기준) — 대부분 이 값만으로 우열이 갈림
-  2. **예측 신뢰도 보정** — 1번이 임계치 이내로 비슷할 때만 적용, 과거 예측 정확도 이력으로 순위 조정(자주 틀린 채널은 하향)
-  3. **Aging 보정(하한선)** — 1·2번도 비슷할 때만 적용, 대기시간에 비례해 보정. "정하는 기준"이 아니라 "굶주림 방지 하한선"
-  4. **배분량(capacity)** — 축이 아니라 위 순서로 정렬한 뒤 결정되는 산출물
-- **예측 신뢰도(`forecast_reliability`) 입력**: walk-forward validation(과거
-  데이터를 시간순으로 잘라, 그 시점까지의 데이터로 다음 구간을 예측 → 실제값과
-  비교 → 기준 시점을 한 칸씩 밀며 반복하는 표준 검증 방식)으로 계산한다.
-  시뮬레이션에서는 데이터의 시간단위(일/주/월)는 그대로 두고 재생 속도만
-  빠르게 한다. 다음 계획주기에도 남아야 하므로 경량 저장소(SQLite 등)에
-  영속화한다 — LLM 파인튜닝이 아니라, LLM 밖의 참고 숫자를 남겼다가 다음 판단 시 제공하는 것
-- **최소 구매 약정 처리**: 구속력 여부와 관계없이 이 agent가 입력으로 받아
-  배분에서 처리한다 — 구속력 있음(take-or-pay)은 하한, 구속력 없음은 이행 불확실성
-  반영. 규칙은 M4·M5에서 정한다(아직 설계 안 함). 약정 잔여량과의 차이가
-  `interaction_protocol`의 알림 기준(구속력 없음이 더 낮음, 항목
-  `supply_coordination->human_manager`)을 넘으면 human_manager에게 **알림**만 보내고 진행을 멈추지 않는다(구현은 M4·M5)
-- **계약 조건 적용**: 고객사별 **공급 보장 물량**은 배분 시 우선 확보하고,
-  capacity 부족으로 채우지 못하면 escalation(M5). **최소 주문 수량(MOQ)**은 배분량을 그 단위에 맞추는 규칙(M4)
-- **공급망계획agent 문제 신호 처리** (Agent, 판단) — 자체 재조정으로 풀지,
-  위/옆(forecast·채널)으로 send-back할지, 사람에게 escalation할지 결정. 같은 이유
-  (`routing_reason` 등)가 반복되면 `max_rounds` 소진을 기다리지 않고 상위로
-  확장할지도 이 agent가 판단한다(반복 기준과 세는 방법은 GRAPH_FLOW.md "검증agent")
-- 공급망계획agent 셋과의 연결 구조(hub-and-spoke)는 GRAPH_FLOW.md 참고
+맡은 일은 **누구에게 얼마를 줄지(배분)**다. 언제 어떻게 만들고 보낼지는 plan agent의 일이라(M5) 배분에 묶음 생산·묶음 배송 같은
+실행 효율을 미리 계산해 넣지 않는다.
+
+**입력**
+- 예측 수요: 전달된 forecast 기록의 `scenario.value`(그 (고객사, item)의 이번 주기 수요)
+- 수주(외부 데이터, 아래 "외부 경계"): 수량·납기·납품한 양. **수주잔고** = 수주 − 납품한 양, **미납분** = 수주잔고 중 납기가 지난 것
+- 사람이 정한 수량(외부 데이터)
+- 계약 조건(외부 데이터): 최소 구매 약정(구속력 여부, 약정 총량, 계약 기간, 이미 가져간 양), 공급 보장 물량, 계약 단위
+- 공급: 그 라인의 `capacity_pools.remaining_capacity`, item별 재고와 생산 중 물량(외부 데이터)
+- 라인 소속: `line_assignments`(외부 데이터)
+
+**수요 합치기** — 같은 (고객사, item)에 예측 수요와 이번 주기 납기의 수주가 함께 있으면, 이번 주기 수요는 둘 중 큰 쪽이다
+(수주가 들어온 만큼 예측을 깎는 방식 — 같은 수요를 두 번 세지 않음). forecast는 주문이 얼마나 올지만 예측하고, 이미 들어온 수주와
+합치는 일은 여기서 한다. 미납분은 이와 따로 센다.
+
+**공급 가능량** = 재고 + 생산 중 물량 + 이번 주기 잔여 capacity. 생산 중 물량은 그 물량이 묶인 수주에 강한 묶임으로 먼저 배정한다.
+
+**배분 규칙** (Agent 판단 자리지만 M4까지는 규칙. 순서대로 적용하고, 앞 단계에서 공급이 모자라면 그 단계 안에서 나눈다):
+0. 강한 묶임 물량은 그대로 둔다
+1. **미납분**: 납기가 오래 지난 것부터, 같으면 요청량 비율로
+2. **계약 하한**: 고객사별로 (구속력 있는 최소 구매 약정의 이번 주기 몫)과 (공급 보장 물량) 중 큰 쪽. 약정의 이번 주기 몫 =
+   (약정 총량 − 이미 가져간 양) ÷ 계약 기간의 남은 개월 수
+3. **1개당 마진**(공급가 − 제조원가, 원가 입력)이 큰 쪽부터
+4. 마진이 같으면 **요청량 비율**로 나눈다(같은 비율로 일부씩 받음 — 한 고객사만 다 받고 다른 쪽이 0이 되지 않게)
+5. **계약 단위**로 내림하고, 단위가 안 되는 자투리는 배분하지 않는다(재고로 남아 다음 배분에서 재고로 계산된다)
+
+- 시뮬레이션은 공급가가 1이고 원가 비율이 업종별이라 같은 라인 안에서는 1개당 마진이 같다. 그래서 3단계는 동점이 되고 4단계의
+  비율 배분이 된다. 고객사별 계약 공급가가 들어오면 3단계가 차이를 낸다.
+- 1·2단계를 합쳐 공급 가능량을 넘으면 그 라인은 `commitments_exceed_capacity` escalation이다(`human_manager`, intervention — 모드는
+  `interaction_protocol`에서 바꿀 수 있음). 강한 묶임 합계가 공급 가능량을 넘으면(capacity가 줄어든 경우) `pegged_exceed_capacity`다.
+  둘 다 그 라인은 이전 결론을 유지하고 다른 라인은 진행한다.
+- **구속력 없는 약정은 하한이 아니다**(고객사가 덜 주문할 수 있어 약정만큼 맞춰 두면 남을 위험). 배분이 약정의 이번 주기 몫과
+  알림 기준 이상 차이 나면 `commitment_gap` notice만 보내고 진행한다. 기준은 구속력 있는 약정과 없는 약정이 다르다(STATE_SCHEMA.md 5번 절).
+
+**이어지는 조율**(정기 조율 뒤 들어온 값) — 새 값은 남은 공급에서 먼저 받고, 모자라면 같은 라인의 약한 묶임 물량 중 같은 item인
+것과 위 배분 규칙의 순서로 비교해 옮긴다. 강한 묶임은 옮기지 않는다. 남은 공급 안이거나 약한 묶임끼리 바꾸는 변경은 혼자
+처리하고, plan agent의 계획에 영향을 주는 변경은 회의를 연다(M5). 조율의 시점과 순서는 GRAPH_FLOW.md "조율 흐름".
+
+**기록 쓰기와 검증** — 조율 한 번을 끝내고 라인의 결론을 `allocations`에 한 번 쓴다(로그 `allocation_decided`, 덮어쓰기 전 값 포함).
+검증agent `allocation_validation`이 배분 합계가 공급 가능량을 넘지 않는지 본다. `failed`이면 입력(capacity, 재고, 수요)이 판정 때와
+달라졌으면 다시 조율하고, 같으면 배분 로직 오류로 `allocation_invalid` escalation(`system_operator`)이다. 다시 조율하는 것은 입력이
+바뀐 경우뿐이라 반복 횟수는 세지 않는다.
+
+**조율 시작 규칙** — 어떤 수요가 한 번의 조율에 들어가는지 정하는 규칙은 교체 가능한 class로 둔다(같은 입출력, 구현체만 교체).
+기본 규칙은 GRAPH_FLOW.md "조율 흐름".
+
+**M5에서 더하는 것** — 회의 참여(GRAPH_FLOW.md "공급망계획agent 연결 구조"), plan agent의 대안 판단(대안이 아끼는 비용과, 그
+대안 때문에 어기게 되는 비용 — 결품 위약금 등 — 을 원가 입력으로 계산해 비교. 비용으로 바꿀 수 없거나 차이가 애매하면 M7의 LLM
+판단이나 사람), 문제가 수요 값에 있으면 forecast에 send-back, 공급 보장 물량을 채우지 못할 때의 escalation(sales_channel 통지보다 먼저).
 
 ### procurement_plan agent (Agent, 1개, role_tag: `procurement_plan`)
 카드는 M5에서 정의한다.
@@ -291,7 +321,8 @@ agent 카드가 생기는 M5까지), `response_type`은 `optimization`(단방향
 공급업체 선정·계약관리는 이미 전제로 주어진 것으로 스코프 밖(발주/주문
 처리만 담당). **여러 (회사,item) 인스턴스의 요청을 1개 agent 내부에서
 안건별로 처리** — 공급처 capacity처럼 공유자원을 다루는 agent는 나눌 수
-없음(supply_coordination을 1개로 둔 것과 같은 논리). `capacity_pools` 접근 권한은 STATE_SCHEMA.md 참고.
+없음(supply_coordination을 1개로 둔 것과 같은 논리). 원료처럼 여러 라인이 함께 쓰는 자원은 이 agent 안에서 관리해 각 회의에
+반영한다(M5). `capacity_pools`는 참조하지 않는다(STATE_SCHEMA.md 2번 절).
 **데이터 소스**: 실거래 데이터 없음 → 업계 KPI(평균)+표준편차 기반 확률분포
 샘플링(추정 입력 + 사후 결과 확인, 양쪽에 재사용, 고정값 아님).
 
@@ -299,17 +330,24 @@ agent 카드가 생기는 M5까지), `response_type`은 `optimization`(단방향
 생산 일정·라인 배정 **스케줄링 결정**까지가 판단, 과거 리드타임/불량률
 패턴 추정 단계 선행(위와 동일한 이유로 별도 agent 분리 안 함). 실제 라인이
 도는 것(원자재 투입, 라인 실행)은 외부 경계 — 실제 생산/조립 실행·
-품질테스트·인바운드/창고운영은 **제외**(물리적 실행 영역). 공유/전용 라인
-전환(초기엔 여러 품목이 changeover로 한 라인을 공유하다, 수요가 확인되면
-전용라인 전환)도 이 스케줄링 판단 범위. 여러 (회사,item) 인스턴스 요청을
+품질테스트·인바운드/창고운영은 **제외**(물리적 실행 영역). 여러 (회사,item) 인스턴스 요청을
 1개 agent 내부에서 처리(생산라인이라는 공유자원). `capacity_pools`를 직접
-접근하는 유일한 plan agent(STATE_SCHEMA.md 참고).
+접근하는 유일한 plan agent(STATE_SCHEMA.md 2번 절).
+M5에서 정하는 판단 범위:
+- **준비량**: 새로 생산할 양 = 수요 + 미납분 − 재고 − 생산 중 물량 + 안전재고. 안전재고 입력은 forecast 기록의
+  `forecast_uncertainty`(임시 — M6에서 실제 예측 정확도로 교체)이고, 결품을 어디까지 허용할지(서비스 수준)는 설정값이다. 원가 입력을 쓴다.
+- **생산 최소 단위**: 한 번에 최소로 돌려야 하는 양이 있으면 올려서 만들고 남는 양은 재고가 된다(다음 계산에서 재고로 반영돼 중복되지 않음).
+- **라인 배정**: `line_assignments`가 허용한 라인(주 라인·대체 라인) 안에서 고른다. 라인 전환은 회의에서 제안하고, 정해지면 기준
+  정보를 갱신해 다음 조율부터 적용한다. 공유/전용 라인 전환(초기엔 여러 품목이 changeover로 한 라인을 공유하다, 수요가 확인되면
+  전용라인 전환)도 이 범위이고, 전용 라인 여부는 라인 자체의 정보(`production_lines`)에 둔다.
+- **묶임**: 배분 항목의 `peg`(강한/약한 묶임)를 정한다.
 **데이터 소스**: 업계 KPI(평균)+표준편차 기반 확률분포 샘플링(추정+결과 확인 겸용, 고정값 아님).
 
 ### logistics_plan agent (Agent, 1개, role_tag: `logistics_plan`)
 배송 자원·일정 **배정 결정**까지가 판단, 과거 배송 지연 패턴 추정 단계
 선행. 실제 운송/배송 실행은 외부 경계. 여러 (회사,item) 인스턴스 요청을
-1개 agent 내부에서 처리(배송capacity라는 공유자원). `capacity_pools` 접근권한은 STATE_SCHEMA.md 참고.
+1개 agent 내부에서 처리(배송capacity라는 공유자원 — 트럭처럼 여러 라인의 물량이 함께 쓰는 자원은 이 agent 안에서 관리해 각
+회의에 반영한다, M5). 재고에서 출고 계획을 세울 때 재고 데이터를 읽는다. `capacity_pools`는 참조하지 않는다(STATE_SCHEMA.md 2번 절).
 **데이터 소스: SynDelay**(실데이터로 학습된 생성모델의 합성 데이터, 추정 입력 + 사후 결과 확인 겸용).
 
 ## 검증agent (워커풀 방식으로 일감을 받되, 판정만 하고 라우팅은 안 함)
@@ -319,12 +357,15 @@ agent 카드가 생기는 M5까지), `response_type`은 `optimization`(단방향
   새로 읽고 판단, 자기만의 작업 히스토리를 안 가짐. 워커가 몇 명이든 아무나 집어가도 문제없음) — 지속 태스크가 아님
 - **판정만 하고 라우팅 권한은 갖지 않는다** — "문제가 생겼을 때 그걸
   어디로 돌려보내고 어떻게 처리할지"는 이미 각 agent 자신의 역할(forecast의 재실행,
-  supply_coordination의 "공급망계획agent 문제 신호 처리" 등)에 있는 권한이라
+  supply_coordination의 회의 판단(M5) 등)에 있는 권한이라
   중복되면 안 됨. 검증agent는 어디로 보낼지 정하는 게 아니라 "누구에게 문제가 있는지"만 작성agent에게 알린다.
   다음 agent에게 전달하지 않는 것도 같은 이유다 — 전달하려면 그래프 구조 전체를 알아야 한다. 판정을 쓰면 기록이 "판정됨" 상태가 되어
   작성agent에게 신호가 가고(흐름은 GRAPH_FLOW.md "검증agent"), 라우팅 판단 없이 이미 정해진 목적지로 보내는 일은 작성agent가 한다
 - **받는 신호를 상태로 확인한다**: 검증agent는 신호를 받으면 기록을 직접 읽고 "검증 대기" 상태일 때만 판정한다. 이미 판정됐거나
-  "사람 대기"인 기록의 신호(늦게 도착한 신호 포함)는 아무것도 하지 않고 넘어간다
+  "업무 대기"·"시스템 대기"인 기록의 신호(늦게 도착한 신호 포함)는 아무것도 하지 않고 넘어간다
+- **검증 시점은 agent가 맡은 일이 끝났을 때다**: agent 내부 단계는 검증하지 않는다. 어느 agent를 어느 검증agent가 언제 검증하는지는
+  `validation_settings`(STATE_SCHEMA.md 9번 절)가 정한다 — forecast는 한 번 실행을 마치고 쓴 기록, supply_coordination은 조율을 끝내고
+  쓴 결론(`allocations`), M5의 plan agent는 회의에 쓴 기록마다
 - **State와 이번 주기 스냅샷만 읽는다**(GRAPH_FLOW.md "계획 주기와 스냅샷"). 스냅샷 기준일은 작성agent와 같다
 - **작성agent가 스스로 확인할 수 없는 것만 본다**: 선언한 근거가 실제로 있는지, 결과가 상식 범위 안인지, agent 경계를
   넘는 제약(예: 배분 합계가 `capacity_pools` 총량을 넘는가). 작성agent가 자기 계산 안에서 확인할 수 있는 것은 보지 않는다.
@@ -341,10 +382,13 @@ agent 카드가 생기는 M5까지), `response_type`은 `optimization`(단방향
 
   forecast 검증agent(`forecast_validation`)는 `assumption` 유형의 이유만 판정에 싣는다. 어긴 경우 `suspected_causes`에
   담기는 문제 내용 값과 지목하는 원인(`drivers`)은 STATE_SCHEMA.md `suspected_cause` 표에 있다
+- **배분 결론 검증 조건**(`allocation_validation`, 라인마다 확인): 배분 합계가 그 라인의 공급 가능량(재고 + 생산 중 물량 + 이번 주기
+  잔여 capacity)을 넘지 않는가. capacity는 생산 쪽 자원이라 agent 경계를 넘는 제약이다. 미납분·계약 하한을 지켰는지는 supply_coordination이
+  직접 적용한 규칙이라 다시 보지 않는다(계산 재현). plan agent의 검증 조건은 M5에서 더한다
 - 판정 결과(`validation.status`)는 검증 대상 record에 직접 쓴다. 판정별로 누구에게 무엇이 가는지는 GRAPH_FLOW.md "검증agent" 참고
 - **`failed` 뒤의 처리 판단은 작성agent의 몫**: 자체 재조정할지, 더 위로 send-back할지(작성agent가 기록을 받은 쪽이 아니라 보내는 쪽일 때)는 작성agent 자신의 기존 역할이
   판단한다(검증agent가 그래프 구조 전체를 알아야 하는 상황을 피하기 위함). 상위로 확장할지 정하는 반복 기준
-  (`interaction_protocol`의 `max_rounds`/`repeat_escalation_threshold`/`escalation_target`)도 작성agent가 조회한다
+  (`interaction_protocol`의 `max_exchanges`/`repeat_escalation_threshold`/`escalation_target`)도 작성agent가 조회한다
 - **`error`는 시스템 장애**: 검증 규칙의 판단이 아니라 검증 절차의 비정상 종료이고, 재시도하지 않고 바로 escalation한다
 - **여전히 남는 한계**: 검증agent 자신이 "이상 없음(passed)"을 잘못 낸
   경우는 실시간으로 못 잡음 — "검증을 검증하는" 상위 검증을 또 두면 같은
@@ -398,38 +442,55 @@ agent 카드가 생기는 M5까지), `response_type`은 `optimization`(단방향
 
   - 우리 회사는 가상 공급사라 INA-R에 매출이 포함되지 않으므로 `includes_own_sales: false`
   - 원가는 기간별 자료가 없어 전 기간에 Damodaran 신흥국 2017년 값 하나를 쓴다
+- **supply_coordination이 읽는 외부 데이터**(모두 스냅샷 데이터이고 인터페이스 함수로 읽는다. State에 두지 않는다 — 우리 agent가
+  판단해서 쓰는 값이 아니라 밖에서 결과로 들어오는 값이기 때문):
+
+  | 데이터 | 한 행 | 비고 |
+  |---|---|---|
+  | 수주 | `{ demand_id, company_id, item_id, quantity, order_date, due_date, delivered_quantity }` | 고객사에게서 받은 주문 전체. `due_date`는 고객사 도착 기준. 납품이 끝난 수주는 forecast의 주문 이력이 된다. 수주잔고와 미납분은 이 데이터에서 계산한다 |
+  | 사람이 정한 수량 | `{ demand_id, source: "manual", input_reason: "new_customer" \| "new_product" \| "promotion", company_id \| null, item_id, quantity, entered_at }` | 주문은 없는데 사람이 수량을 정한 것(신제품 첫 물량, 프로모션 이력이 없는 고객사·item의 프로모션 수량, 계약은 맺었지만 아직 주문하지 않은 새 고객사의 예상 물량). 고객사가 주문을 넣으면 그 뒤는 수주다. 넣을 때 입력 제한을 거친다 |
+  | 계약 조건 | 최소 구매 약정 `{ company_id, item_id, binding, total_quantity, period_start, period_end }`, 공급 보장 물량, 계약 단위(상품별 기본값 + 고객사별 덮어쓰기) | 계약 단위는 상자·팔레트처럼 주문과 배분이 따르는 단위다 |
+  | 재고·생산 중 물량 | 재고 `{ item_id, quantity }`, 생산 중 물량 `{ item_id, quantity, demand_ref }` | 물리적 실행(외부 경계)의 결과. 생산 중 물량 = 계획된 생산량 − 완료된 양. M4는 고정 파일 스텁 |
+  | 라인 기준 정보 `line_assignments` | `{ item_id, line_id, preference: "primary" \| "alternate", valid_from }` | 어느 item을 어느 라인에서 만들 수 있는가(N:M). 시스템을 처음 설정할 때 등록하고 제품이 추가될 때 갱신한다 |
 
 ### sales_channel (role_tag: `sales_channel`)
 디지털영업(3.5.8) 등 — 입력과 출력 둘 다.
-- **입력**: forecast agent에 주문 이력(표시 포함), 고객사가 공유한 POS,
-  프로모션 일정을 제공. 고객사별 계약 조건(최소 구매 약정·공급 보장 물량·MOQ)은
-  supply_coordination에 제공한다. forecast를 거치지 않는 수량(새 고객사 첫 주문, 신제품 첫 물량,
-  프로모션 이력이 없는 고객사·item의 프로모션 수량)은 human_input으로
-  supply_coordination에 바로 들어가고, 납품된 뒤에는 주문 이력의 한 기간이 된다
+- **입력**: forecast agent에 주문 이력(표시 포함), 고객사가 공유한 POS, 프로모션 일정을 제공. supply_coordination에는 수주(앞으로
+  납기가 올 수주 포함)와 고객사별 계약 조건(최소 구매 약정·공급 보장 물량·계약 단위)을 제공한다. 주문이 없는 수량은 사람이 정한
+  수량으로 supply_coordination에 바로 들어간다(위 표). 사람이 정한 수량과 수주는 납품된 뒤 주문 이력의 한 기간이 된다
 - **수주 데이터 생성기**: 공개 B2B 수주 데이터가 없으므로, 공개 POS 위에
   고객사의 재고 정책(표준 재고정책, 예: 재고가 기준 아래로 떨어지면 채우는
-  방식, 정기 발주)을 시뮬레이션해 주문 이력을 생성한다. 생성기는 고객사의 행동을 대신하는 외부 경계이며, 조건:
+  방식, 정기 발주)을 시뮬레이션해 주문을 생성한다. 생성기는 고객사의 행동을 대신하는 외부 경계이며, 조건:
   1. forecast agent는 결과(POS, 주문)만 받는다 — 현실의 공급사도 고객사의 재고 정책을 모른다
   2. POS와 주문의 관계를 **완벽하게 만들지 않는다**(정책 파라미터의 시기별
      변화, 발주 타이밍의 불규칙성, 수동 조정 같은 예외 포함) — 그렇지
      않으면 forecast가 POS로 주문을 역산해 예측 정확도가 부풀려진다
-  3. 고객사마다 정책 파라미터를 다르게 둬 고객사별 특성을 만든다. MOQ가 있으면 발주가 그 단위를 따른다
-  4. 한 번 생성해 **고정 파일**로 저장하고, 실행 때마다 다시 만들지 않는다
-- **출력**: supply_coordination의 배분 결정을 받아 그 안에서 거래
+  3. 고객사마다 정책 파라미터를 다르게 둬 고객사별 특성을 만든다. 발주는 계약 단위를 따른다
+  4. 고객사의 재고 정책은 **주문했지만 아직 받지 못한 양을 가진 양에 넣는다** — 그래야 미납분을 기다리는 동안 같은 양을 다시
+     주문하지 않는다
+  5. 앞으로 납기가 올 수주(주문일은 스냅샷 기준일 이전, 납기는 이후)도 같은 생성기가 만든 주문으로 만든다
+  6. 한 번 생성해 **고정 파일**로 저장하고, 실행 때마다 다시 만들지 않는다
+- **출력**: "완료" 상태의 `allocations`(검증을 통과한 배분 결론)를 읽어 그 안에서 고객사에 약속하고 거래한다. M5부터는 plan agent가
+  할 수 있다고 확인한 결론만 완료가 된다
 
 ### 물리적 조달·생산·배송 실행
-각 계획agent의 결정이 실제로 이행됐는지(리드타임, 불량률, 배송지연)의
-결과값만 `exchanges[i].response_status`/`response`로 돌아옴.
+각 계획agent의 결정이 실제로 이행됐는지(완료량, 리드타임, 불량률, 배송지연)의
+결과값만 외부 데이터로 돌아온다(재고·생산 중 물량 포함).
 
 ## 사람
 
+두 사람 모두 지속 태스크가 아니라 이벤트 워커풀과 같은 성격이다 — `escalation_records`에 자기 담당 항목이 생기면 그때 반응한다
+(대시보드). escalation_records를 통해 개입 시점과 이유가 기록된다. 담당별 reason은 STATE_SCHEMA.md 7번 절.
+
 ### human_manager (사람, Agent 아님, role_tag: `human_manager`)
-지속 태스크가 아니라 이벤트 워커풀과 같은 성격 — escalation_records에
-새 항목이 생기면 그때 반응(대시보드). escalation_records를 통해 개입 시점과
-이유가 기록됨. **알림**(예: 최소 구매 약정과 배분의 차이)은 받기만 하고
-진행을 멈추지 않는다. 알림도 `escalation_records`에 기록되며,
-`mode: "notice"`로 멈추는 escalation(`mode: "intervention"`)과 구분된다.
+업무 판단을 맡는다(요청량, 계약 하한 조정 등). **알림**(예: 최소 구매 약정과 배분의 차이)은 받기만 하고 진행을 멈추지 않는다.
+알림도 `escalation_records`에 기록되며, `mode: "notice"`로 멈추는 escalation(`mode: "intervention"`)과 구분된다. 자기 담당 기록과
+`allocations`를 읽을 수 있고, `system_operator` 담당 기록은 읽지 않는다.
+
+### system_operator (사람, Agent 아님, role_tag: `system_operator`)
+시스템 오류(실행 실패, 검증 절차 오류, 카드 설정 문제, 배분 로직 오류)를 맡는다. 고친 뒤 `rerun` 또는 `dismiss`로 처리한다. 원인을
+찾으려고 업무 담당자의 기록과 입력값도 읽을 수 있다.
 
 ## 아직 확정 안 된 것
 
-- supply_coordination agent의 "우선순위 점수 산출"이 순수 함수인지 일부 판단이 섞이는지 — 실제 구현하면서 재확인
+- supply_coordination의 배분 규칙에 판단이 섞이는 부분(규칙이 확신하지 못하는 경우)이 있는지 — M7에서 실제로 구현하면서 결정

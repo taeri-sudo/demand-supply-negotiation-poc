@@ -31,17 +31,17 @@ M0에서 미리 실물로 넣고, LLM 호출·실데이터 연동·SQLite 영속
 읽어 동작한다(M3부터 적용).** 검증agent는 라우팅 권한이 없고 판정만 하며 다음 agent에게
 전달하지 않는다(GRAPH_FLOW.md "검증agent" 참고). 판정을 쓰면 기록이 "판정됨" 상태가 되어 작성agent의
 작성agent의 채널(`role_tag`)로 신호가 간다(edge별 분기가 필요 없다). `passed`면
-작성agent가 원래 다음 agent에게 직접 보내고, `failed`면 작성agent가 처리하며, `error`는 바로 escalation 기록을 만든다(사람 대기).
+작성agent가 원래 다음 agent에게 직접 보내고, `failed`면 작성agent가 처리하며, `error`는 바로 escalation 기록을 만든다(시스템 대기).
 `if edge == "forecast<->supply_coordination"` 식으로 하드코딩하지 않는다. `interaction_protocol`의
-`max_rounds`/`repeat_escalation_threshold`/`escalation_target`은 검증agent가
+`max_exchanges`/`repeat_escalation_threshold`/`escalation_target`은 검증agent가
 아니라 `failed`를 받은 작성agent 자신이 재조정할지·상위로 확장할지 판단할 때
 조회한다(검증agent가 그래프 구조 전체를 몰라도 되게 하기 위함). 나중에 새
-edge(예: plan agent 간 직접 상호작용, M5/M8에서 미확정으로 남긴 것)가 추가돼도
+edge(예: M5의 회의 엣지)가 추가돼도
 검증agent 코드는 손대지 않고 `interaction_protocol`에 항목만 추가하면 되어야 한다.
 
 **2. 규칙 기반 판단 스텁은 LLM 구조화 출력과 동일한 pydantic 스키마로 반환한다(M1부터
 적용, M7에서 교체).** forecast(통합된 예측 agent)의 가정 정의·데이터 소스 판단·
-통계기법 선택·가정 선택, supply_coordination의 우선순위 판단, plan agent의
+통계기법 선택·가정 선택, supply_coordination의 배분 판단, plan agent의
 feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은, 지금 규칙 기반으로
 구현하더라도 `{판단값, 근거}` 형태의 공통 pydantic 모델을 반환하게 만든다. M7에서는
 이 스텁 함수의 내부 구현만 Gemini 구조화 출력 호출로 교체하고, 호출부(인터페이스)는
@@ -281,98 +281,115 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
 - DESIGN.md 갱신: "진행 상황"에 M3 요약, "검토 후 유지 확정"에 "검증agent는 판정만 하고 라우팅은 각 agent 자신의
   역할로 분리, edge 추가 시 코드 변경 불필요" 기록.
 
-### M4 — N개 (회사,item) 인스턴스로 확장 + 진짜 병행성 증명
-- `forecast`(analysis 통합) agent를 (회사,item) 인스턴스별 N개(`asyncio.create_task()`)로 생성 — LangGraph
-  Send API 대신 asyncio를 택한 핵심 근거(스텝 동기화 없는 진짜 병행)를 여기서 증명.
-- 우선순위 tier 1(revenue_impact)·tier 3(aging 하한선)·tier 4(배분량 산출)만 구현,
-  tier 2(forecast_reliability)는 SQLite가 필요하므로 M6까지 스텁(**공통 규칙 2** 적용).
-- 여러 회사가 공유 `capacity_pools`를 실제로 경합하는 상황 구성.
-- forecast를 거치지 않는 수요(human_input — 새 고객사 첫 주문, 신제품 첫 물량,
-  프로모션 이력이 없는 고객사·item의 프로모션 수량)의 `allocation_candidates`
-  반영 구조(`demand_id`/`source` 등, 고객사 지정은 선택) 확정·구현.
-- MOQ: 배분량을 고객사별 최소 주문 수량 단위에 맞추는 규칙 구현.
-- 최소 구매 약정: sales_channel에서 입력으로 받아 배분에서 처리하는 규칙을 정하고 구현한다
-  (구속력 있음은 하한, 구속력 없음은 이행 불확실성 반영). 약정 잔여량과의 차이가 알림
-  기준(`supply_coordination->human_manager`, 구속력 없음이 더 낮음)을 넘으면 알림만 보내고
-  진행을 멈추지 않는다. 검증: 구속력 있으면 배분이 약정 잔여량 이상인지, 같은 차이에서
-  구속력 없는 쪽만 알림이 나가는 경우를 재현하고 알림 후에도 진행이 멈추지 않는지.
-- forecast의 사람 escalation 처리: `resolution` 모양, 응답 대기 시한과 시한 초과 시 처리, `status` 값 목록
-  (STATE_SCHEMA.md "아직 정하지 않은 것"). 사람이 처리한 뒤 `scenario`/`selection_basis`를 어떻게 이어 진행하는지.
-- supply_coordination 검증 규칙: 배분 합계가 `capacity_pools` 총량을 넘는지(agent 경계를 넘는 제약). M3의 공통 틀에
-  규칙만 더하고 검증agent 코드는 바꾸지 않는다. supply_coordination 기록이 `failed`될 때
-  `repeat_escalation_threshold`가 필요한지도 여기서 정한다(STATE_SCHEMA.md 5번 절).
+### M4 — 생산라인 단위 조율 + N개 (회사,item) 인스턴스
+- **N개 인스턴스**: forecast를 (회사,item)마다 `asyncio.create_task()`로 여러 개 실행하고, 여러 회사·item이 같은 라인의 capacity를
+  실제로 경합하는 상황을 만든다. 이 마일스톤은 여러 인스턴스가 번갈아 진행될 때 결과가 맞는지만 확인한다. 한 인스턴스가 기다리는
+  동안 다른 인스턴스가 실제로 진행되는 병행성 증명은 실제 기다림(LLM 응답 대기)이 생기는 M7에서 한다.
+- **State 변경**(STATE_SCHEMA.md): `allocation_candidates`→`allocations`(라인마다 확정된 결론 하나), `capacity_pools`의 식별자를
+  `line_id`로, `forecast_records`에서 `pool_key` 제거, `validation_settings` 추가(최상위 필드 9개), `role_permissions`에 `a`(이어서
+  쓰기 — `role_logs`에 적용), `interaction_protocol`의 `max_rounds`→`max_exchanges`(선택 필드)와 항목 정리(5번 절의 세 항목),
+  `escalation_records`의 `target_role`·`line_id`·`deadline`·`status`·`resolution`.
+- **기록 상태**(GRAPH_FLOW.md "신호 규칙"): 일곱 가지 상태(업무 대기, 시스템 대기, 되돌려짐, 전달됨, 완료, 판정됨, 검증 대기). forecast의
+  `forecast_run_error`·`validation_error`·`no_next_agent`·`multiple_next_agents`는 `system_operator` 담당이다.
+- **외부 데이터**(AGENT_NODE_LIST.md "외부 경계"): 수주(앞으로 납기가 올 수주 포함 — 수주 생성기 확장, 고객사 재고 정책이 받지 못한
+  주문을 가진 양에 넣는지 확인), 사람이 정한 수량, 계약 조건(최소 구매 약정·공급 보장 물량·계약 단위), 재고·생산 중 물량(고정 파일
+  스텁), `line_assignments`(M4는 `primary`만). 라인의 `total_capacity` 초기값(가동률 0.8 임시).
+- **supply_coordination**(AGENT_NODE_LIST.md): 수요 합치기, 공급 가능량, 배분 규칙(미납분 → 계약 하한 → 1개당 마진 → 비율 → 계약 단위),
+  하한 초과·강한 묶임 초과 escalation, 약정 차이 알림, 결론 쓰기와 실패 처리. 묶임(`peg`)은 테스트에서 지정한다. 배분 판단은 **공통 규칙 2**를 따른다.
+- **조율 흐름**(GRAPH_FLOW.md "조율 흐름"): 정기 조율 시작 규칙(교체 가능한 class), 정기 조율 전 변경 무시, 입력 고정과 마지막 순서로
+  얹기, 이어지는 조율의 시점(즉시 / 하루 한 번 정해진 시각), 스케줄러.
+- **검증**: `allocation_validation`(배분 합계 ≤ 공급 가능량)을 M3의 공통 틀에 규칙만 더해 구현한다. 검증 대상과 시점은 `validation_settings`에서 읽는다.
+- **escalation 처리**(STATE_SCHEMA.md 7번 절): reason 대응표(담당·긴급도·시한 초과 처리), 사람의 처리 함수(escalation 기록과 값을
+  받는 기록을 한 번의 `update_state`로), 입력 제한, 시한 초과 처리.
+- **신호 전달**: 확인 응답 방식(GRAPH_FLOW.md "동시성 모델").
 
 **검증**
-- 3개 이상 인스턴스 동시 실행 시 한 인스턴스가 응답을 기다리는 동안 다른 인스턴스가 실제로
-  진행되는지(같은 회사의 서로 다른 item 인스턴스 포함, 로그 순서가 인터리빙되는지)
-  — 안 되면 asyncio 채택 근거 자체가 무너지므로 핵심 검증.
-- capacity 부족 상황에서 revenue_impact 순으로 배분되는지.
-- M0의 Lock이 다중 agent 부하에서도 `remaining_capacity`와 배분 합이 일치하는지.
-- capacity 총량을 넘는 배분안이 `failed`로 판정되고 `supply_coordination` 채널로 돌아가는지.
-- DESIGN.md 갱신: "진행 상황"에 M4 요약, "검토 후 유지 확정"에 "N개 회사 동시 실행 시
-  실제 인터리빙 병행 확인(asyncio 채택 근거 검증됨)" 기록.
+- 여러 인스턴스(같은 회사의 다른 item, 같은 라인을 함께 쓰는 수요, 혼자 쓰는 라인을 섞음)가 함께 돌 때 배분 결과·`remaining_capacity`·
+  로그가 맞는지, 실행 순서를 바꿔도 같은 배분이 나오는지. M0의 Lock이 이 부하에서도 `remaining_capacity`와 배분 합을 일치시키는지.
+- 정기 조율: 그 라인 인스턴스 중 처리 중인 것이 있으면 시작하지 않고, 업무 대기·시스템 대기만 남으면 시작해 그 인스턴스를 빼고
+  배분하는지. 다른 라인을 기다리지 않는지. 검증 불합격으로 재실행 중인 인스턴스의 결과가 같은 조율에 드는지.
+- 정기 조율 전에 온 변경 신호는 아무 일도 하지 않고, 그 변경이 정기 조율에 함께 들어가는지.
+- 조율 중 들어온 값이 결론 직전의 확인에서 마지막 순서로 얹히고, 확인 뒤 들어온 값은 바로 이어지는 조율로 가는지. 결론이 한 번만 써지는지.
+- 이어지는 조율: 사람의 처리 결과·사람이 정한 수량·급한 변경은 진행 중인 조율 직후에, 일반 자동 변경은 정해진 시각에 조율되는지.
+  조율을 열 때 그 라인에 모인 변경이 모두 들어가고 다른 라인 것은 들어가지 않는지. 강한 묶임은 바뀌지 않고 약한 묶임만 옮겨지는지.
+- 수요 합치기: 같은 (고객사, item)에서 예측보다 수주가 작으면 예측, 크면 수주가 수요가 되는지(같은 수요가 두 번 세어지지 않는지).
+- 배분 규칙: 미납분(납기가 오래 지난 순) → 계약 하한(약정의 이번 주기 몫 = 잔여 ÷ 남은 개월 수, 공급 보장 물량 중 큰 쪽) → 1개당
+  마진 → 요청량 비율 순으로 나뉘는지. 계약 단위로 내림되고 자투리가 배분되지 않는지.
+- 하한 초과: 미납분과 계약 하한의 합이 공급 가능량을 넘으면 그 라인만 `commitments_exceed_capacity` 업무 대기가 되고 이전 결론이
+  유지되며 다른 라인은 진행하는지. `interaction_protocol`의 모드를 `notice`로 바꾸면 코드 변경 없이 멈추지 않는지. 강한 묶임 합계가
+  capacity 감소로 공급 가능량을 넘으면 `pegged_exceed_capacity`인지.
+- 약정 차이: 같은 차이에서 구속력 없는 약정만 알림이 나가는 경우를 재현하고, 알림 후에도 진행이 멈추지 않는지. 구속력 없는 약정이
+  하한으로 쓰이지 않는지.
+- 배분 결론 검증: 배분 합계가 공급 가능량을 넘으면 `failed`이고, 입력이 바뀌었으면 다시 조율, 같으면 `allocation_invalid`
+  (`system_operator`)인지. `passed`면 "완료"이고 신호가 가지 않는지.
+- escalation 처리: 사람이 forecast의 reason을 처리하면 요청량이 `scenario`에 들어가고 `selection_basis: "human"`이며 검증agent를 다시
+  거치지 않고 다음 agent로 넘어가는지. 입력 제한을 어긴 값이 거부되는지. 시한이 지나면 reason별 처리(중간값으로 진행, 재실행 전 값으로
+  진행, 예측 수요 없이 진행)대로 되고 `status: "expired"`인지. `system_operator` 담당 reason은 시한 없이 시스템 대기로 남는지. 업무
+  담당자가 `system_operator` 담당 기록을 읽지 못하는지.
+- 신호 전달: 처리 중 강제로 실패시킨 신호가 확인 시간 뒤 다시 나타나 처리되고, 처리를 확인한 신호는 다시 오지 않는지. 같은 신호가
+  두 번 와도 결과가 같은지.
+- `a` 권한: `role_logs`에 이어서 쓰기만 되고 기존 항목을 고치는 쓰기가 거부되는지.
+- escalation 대응표에 코드가 만드는 모든 reason이 있는지.
+- DESIGN.md 갱신: "진행 상황"에 M4 요약, 가동률 0.8 임시값과 재고·생산 중 물량 스텁을 데이터 대체 가정으로 명시.
 
-### M5 — supply_coordination ↔ procurement/production/logistics_plan (hub-and-spoke)
-- 세 plan agent를 hub-and-spoke로 연결, 판단은 시드 고정 RNG로 infeasible을 발생시키는
-  규칙 기반부터 시작(**공통 규칙 2** 적용, 업계 KPI 분포 샘플링 정교화는 M7).
-- `required_stages`로 단계 스킵, `exchanges[]` 라운드 누적, `response_status` 종료조건.
-- 최소 구매 약정의 이행 불확실성 반영 규칙은 M4에서 정한 규칙을 plan agent 응답(infeasible)과 연결해 확정한다.
-- 고객사별 공급 보장 물량을 배분 시 우선 확보하고, capacity 부족으로 채우지
-  못하면 escalation — escalation이 sales_channel "조정 불가" 통지보다 먼저 나가는 순서 확정·구현.
-- plan agent 검증 규칙(`procurement_validation` 등)을 M3의 공통 틀에 더한다. 같은 소스에 반대되는 대응이 함께 올 때의
-  우선 규칙을 정한다(M3은 이유 목록을 단계 순서대로 모두 적용하고 서로 반대되는 대응의 우선순위는 정하지 않는다 — AGENT_NODE_LIST.md forecast "재실행").
-- **plan agent 간 직접 상호작용(미확정 사항)은 건드리지 않고, 반드시 supply_coordination
-  경유로만 구현.** M3에서 만든 일반화 게이트 덕분에, 향후 이 상호작용을 열기로 결정하면
-  `interaction_protocol`에 항목만 추가하면 됨(공통 규칙 1).
-- plan agent 카드(`accepts`/`produces`/`known_agents`/`response_type: round_accumulation`)와 supply_coordination의 `known_agents`를 추가한다.
-  후보가 여럿일 때는 M7 전까지 규칙 스텁이 고른다(`allocation_candidates[i].required_stages`). GRAPH_FLOW.md 엣지 표에 plan agent 행을 더한다.
-- plan agent가 infeasible을 보내면 supply_coordination이 forecast 기록의 `send_back`을 써서 역방향
-  send-back을 보낸다(GRAPH_FLOW.md "상호작용 세 가지 유형" 참고, 핸드오프형. `send_back` 필드와 "되돌려짐" 상태 계산은 M3에서 만들었고
-  supply_coordination이 실제로 쓰는 것은 M5다) —
-  M1~M3에서 구현한 재실행 메커니즘(`suspected_causes` 구조)을 그대로
-  재사용한다. 트리거 조건만 procurement_plan 등의 infeasible 응답으로
-  바뀔 뿐, `suspected_causes`(type·issue·source)만
-  정해지면 된다 — 새 라운드/escalation 로직은 필요 없다. `repeat_escalation_threshold`는
-  이 엣지(핸드오프형, 라운드 없음)에는 해당 없음 — 여전히 라운드 누적형인
-  `supply_coordination↔procurement_plan` 등에서만 쓰인다.
-
-**검증**
-- `required_stages`에서 빠진 plan agent가 전혀 호출되지 않는지(호출 카운트 0).
-- logistics_plan을 강제 infeasible 처리했을 때 사슬을 거치지 않고 hub로 바로 돌아오는지 (hub-and-spoke가 chain이 아님을 증명).
-- 반복 infeasible로 `supply_coordination↔procurement_plan`의
-  `repeat_escalation_threshold`가 트립돼 forecast로의 send-back(또는 사람
-  escalation)까지 확장되는 경로 재현 — `repeat_escalation_threshold` 자체는
-  이 라운드 누적형 엣지에서만 계산되고, forecast로의 send-back은 트리거만 될 뿐
-  별도 카운트가 없는지 확인. M3의 헬퍼가 이 엣지에서도 재사용되는지(코드 수정 없이 동작하는지)도 함께 확인.
-- DESIGN.md 갱신: "진행 상황"에 M5 요약, "아직 결정 안 된 것"에 "plan agent 간 직접
-  상호작용 여부 — M8에서 데이터 기반 판단 예정"이 유지되어 있는지 확인.
-
-### M6 — forecast_reliability 영속화 + 우선순위 tier 2
-- SQLite 도입, walk-forward validation 구현.
-- 우선순위 tier 2로 M4 스텁 제거(STATE_SCHEMA.md "우선순위 구조" 참고 — supply_coordination의 배분 우선순위 산출에 쓰임).
-- forecast_reliability 게이트를 실제로 어디에 붙일지는 **별도 확정 필요**
-  — 원래 전제였던 forecast↔supply_coordination 라운드 수렴조건이
-  무효화됐다(DESIGN.md "미구현/todo 필드" 참고). 이 마일스톤에서는
-  산출·영속화 로직만 구현하고, 적용 위치 결정은 뒤로 미룬다.
+### M5 — supply_coordination ↔ procurement/production/logistics_plan (회의)
+- **회의 구조를 먼저 설계한다**(GRAPH_FLOW.md "공급망계획agent 연결 구조"): 회의 기록(`meetings`)의 끝나는 조건과 동시 쓰기를 먼저
+  확정한다. 설계할 수 없으면 같은 문서에 적힌 동시 요청 방식으로 한다. 그다음 `meetings`를 State에 더한다.
+- 세 plan agent를 구현한다. 판단은 시드 고정 RNG로 "요청대로는 안 됨"과 대안을 발생시키는 규칙 기반부터 시작한다(**공통 규칙 2**,
+  업계 KPI 분포 샘플링 정교화는 M7).
+- plan agent 카드(`response_type: round_accumulation`)와 supply_coordination의 `produces`·`known_agents`, `validation_settings` 행(plan
+  agent `per_record`, supply_coordination `on_conclusion`), plan agent 검증 규칙(`procurement_validation` 등)을 M3의 공통 틀에 더한다.
+  GRAPH_FLOW.md 엣지 표에 plan agent 행을 더한다.
+- 회의 범위 규칙(문제가 생긴 자원을 쓰는 수요들), `interaction_protocol`의 회의 엣지 항목(`max_exchanges`, `repeat_escalation_threshold`).
+- 충돌 판단: plan agent의 대안을 비용으로 비교한다(AGENT_NODE_LIST.md supply_coordination agent "M5에서 더하는 것").
+- production_plan: 준비량(안전재고 입력은 `forecast_uncertainty`, 임시), 생산 최소 단위, 라인 배정과 전환(`line_assignments` 갱신,
+  다음 조율부터), 전용 라인 성질(`production_lines`), `peg` 결정. procurement_plan·logistics_plan: 여러 라인이 함께 쓰는 자원 관리.
+- 월 예측을 고객사의 과거 주문 시점 패턴으로 주 단위로 나눠 납기를 두는 함수(판단 없는 계산).
+- plan agent가 요청대로는 안 된다고 했고 문제가 수요 값에 있으면 supply_coordination이 forecast 기록의 `send_back`을 써서 역방향
+  send-back을 보낸다(핸드오프형). M1~M3의 재실행 메커니즘(`suspected_causes`)을 그대로 재사용하고, 재실행은 같은 조율 안에 든다.
+- 공급 보장 물량을 채우지 못하면 escalation — escalation이 sales_channel "조정 불가" 통지보다 먼저 나가는 순서.
+- 구속력 없는 약정의 이행 불확실성 반영 규칙을 plan agent 응답과 연결해 확정한다.
+- 같은 소스에 반대되는 대응이 함께 올 때의 우선 규칙을 정한다(M3은 이유 목록을 단계 순서대로 모두 적용하고 서로 반대되는 대응의
+  우선순위는 정하지 않는다 — AGENT_NODE_LIST.md forecast "재실행").
 
 **검증**
-- 프로세스를 두 번 실행해 두 번째가 저장된 점수를 재계산이 아니라 로드하는지(호출 카운트로 구분).
+- 회의: 참여 agent가 다른 agent의 통과된 기록을 보고 자기 판단을 바꾸는 경우를 재현하는지. 상관없는 agent가 아무것도 쓰지 않아도
+  회의가 끝나는지. 읽은 뒤 새 기록이 생긴 상태에서의 쓰기가 거절되고, 새로 더해진 기록만 읽고 다시 쓰는지. 요청·응답 수가
+  `max_exchanges`를 넘으면 escalation되는지.
+- 검증 시점: plan agent의 기록은 기록마다 검증되고, supply_coordination의 회의 기록은 검증 대상이 아니며 결론만 검증되는지. 통과하지
+  않은 기록을 다른 agent가 판단에 쓰지 않는지.
+- 충돌 판단: 아끼는 비용이 어기게 되는 비용보다 크면 대안을 받아들이고 아니면 원래 요청을 유지하는지.
+- 같은 이유의 반복으로 `repeat_escalation_threshold`가 트립돼 forecast send-back이나 사람 escalation으로 확장되는 경로 재현. M3의 헬퍼가
+  코드 수정 없이 회의 기록에서도 재사용되는지.
+- production_plan의 준비량 계산(수요 + 미납분 − 재고 − 생산 중 물량 + 안전재고)과 생산 최소 단위로 남은 양이 다음 계산에 재고로
+  반영되는지.
+- 공급 보장 미충족 escalation이 sales_channel 통지보다 먼저 나가는지.
+- DESIGN.md 갱신: "진행 상황"에 M5 요약.
+
+### M6 — 실제 예측 정확도 영속화 + 안전재고 입력 교체
+- 주기마다 실제로 낸 요청량(`scenario`)과 그 뒤 실제 주문을 쌓아 (고객사, item)별 예측 정확도를 계산하고 SQLite에 영속화한다
+  (walk-forward validation — 과거 데이터를 시간순으로 잘라, 그 시점까지의 데이터로 다음 구간을 예측 → 실제값과 비교 → 기준 시점을
+  한 칸씩 밀며 반복).
+- production_plan의 안전재고 입력을 `forecast_uncertainty`(임시)에서 이 값으로 바꾼다. 이 값은 배분 순서에는 쓰지 않는다.
+
+**검증**
+- 프로세스를 두 번 실행해 두 번째가 저장된 값을 재계산이 아니라 로드하는지(호출 카운트로 구분).
 - walk-forward 분할 로직을 알려진 기대값의 작은 시계열로 단위 테스트.
-- 우선순위 tier 2 적용 시 revenue_impact가 임계치 이내로 비슷한 경우에만
-  forecast_reliability로 순위가 조정되는지(tier 1이 확실히 갈리면 tier 2가 안 쓰이는지).
-- DESIGN.md 갱신: "진행 상황"에 M6 요약, "미구현·todo 필드"에서
-  forecast_reliability 산출/영속화 항목 제거(적용 위치 미정 항목은 유지).
+- 안전재고 입력을 바꿔도 production_plan의 호출부가 바뀌지 않는지(**공통 규칙 2**와 같은 방식).
+- DESIGN.md 갱신: "진행 상황"에 M6 요약, "미구현·todo 필드"에서 해당 항목 정리.
 
-### M7 — LLM 판단 계층 통합 + 실데이터 연동 강화
+### M7 — LLM 판단 계층 통합 + 실데이터 연동 강화 + 병행성 증명
 - google-genai(Gemini) 구조화 출력을 판단③계층 중 ②(agent판단)가 필요한 지점에 연결:
-  forecast tier 2, 가정 정의(`defined_by: "agent_judgment"`, 실패 시 규칙
-  fallback)·애매한 통계기법 선택·애매한 가정 선택, validator의 근거 타당성 판단, supply_coordination
-  후보안 판단(순수 함수 여부는 여기서 실제로 구현하며 최종 결정 — 미확정 사항 해소).
-  **공통 규칙 2** 덕분에 M1~M6에서 만든 스텁들의 반환 스키마가 이미 동일하므로, 내부
-  구현만 Gemini 호출로 교체하고 호출부는 변경하지 않는다.
+  가정 정의(`defined_by: "agent_judgment"`, 실패 시 규칙 fallback)·애매한 통계기법 선택·애매한 가정 선택, validator의 근거 타당성 판단,
+  supply_coordination의 배분에서 규칙이 확신하지 못하는 경우와 회의에서 비용 비교가 애매한 경우(배분에 판단이 섞이는지는 여기서
+  실제로 구현하며 결정). **공통 규칙 2** 덕분에 M1~M6에서 만든 스텁들의 반환 스키마가 이미 동일하므로, 내부 구현만 Gemini 호출로
+  교체하고 호출부는 변경하지 않는다.
 - 다음 agent 선택에서 후보가 여럿이면 LLM이 카드의 `description`을 읽고 고른다(같은 반환 스키마로 M5의 규칙 스텁을 교체).
 - LLM 호출의 일시적 오류(호출 한도 초과, 응답 시간 초과)에 대한 재시도는 LLM 호출 단위로 둔다. 검증agent의 검증 절차와
   forecast 실행이 예외로 끝나는 시스템 오류는 재시도하지 않고 바로 escalation한다.
+- **병행성 증명**: 한 인스턴스가 LLM 응답을 기다리는 동안 다른 인스턴스가 실제로 진행되는지 확인한다(LangGraph Send API 대신
+  asyncio를 택한 근거). 통계 계산(statsforecast)은 CPU를 쓰는 동기 코드라 계산하는 동안 다른 태스크가 진행되지 않으므로, 그 영향을
+  보고 계산을 스레드나 프로세스로 뺄지 정한다.
 - Langfuse 트레이싱 연결, 고객사 POS 전체 데이터·생성 수주 데이터·시장 데이터·
   SynDelay·업계 KPI 분포 샘플링을 전체 규모로 연동(M2/M5의 로컬 고정 샘플 대체).
 
@@ -380,30 +397,32 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
 - 확실한 케이스는 LLM 호출 없이 규칙만으로 처리되고 애매한 케이스만 LLM이 호출되는지(Langfuse 트레이스로 확인).
 - 구조화 출력이 `cast()` 없이 pydantic 모델로 그대로 파싱되는지.
 - 스텁 → LLM 교체 시 호출부 코드(함수 시그니처, 반환 스키마 사용처)가 변경되지 않았는지(공통 규칙 2 검증).
-- supply_coordination 우선순위 점수 산출을 실제로 구현해보며 "순수 함수인지 판단 포함인지"를 결정하고 근거를 기록.
-- DESIGN.md 갱신: "진행 상황"에 M7 요약, "검토 후 유지 확정"에 "판단③계층 스텁→LLM 교체는
-  인터페이스 변경 없이 구현체만 교체로 완료" 및 우선순위 점수 산출 방식 결론 기록, "아직 결정 안 된 것"에서 해당 항목 제거.
+- 3개 이상 인스턴스를 함께 실행할 때 한 인스턴스가 LLM 응답을 기다리는 동안 다른 인스턴스가 진행되는지(같은 회사의 서로 다른 item
+  인스턴스 포함, 로그 순서가 번갈아 나오는지) — 안 되면 asyncio 채택 근거 자체가 무너지므로 핵심 검증.
+- supply_coordination의 배분을 실제로 구현해보며 "순수 함수인지 판단 포함인지"를 결정하고 근거를 기록.
+- DESIGN.md 갱신: "진행 상황"에 M7 요약, "검토 후 유지 확정"에 "판단③계층 스텁→LLM 교체는 인터페이스 변경 없이 구현체만 교체로
+  완료", "N개 인스턴스의 실제 병행 확인(asyncio 채택 근거 검증됨)", 배분 판단 방식의 결론 기록, "아직 결정 안 된 것"에서 해당 항목 제거.
 
 ### M8 (선택/마무리) — end-to-end 전체 실행 러너 + 남은 미확정 사항 정리
-- N개 회사, 다회 라운드, 의도적 flag/escalation을 포함한 전체 실행 러너 작성.
-- `negotiation_log` 통계를 근거로 "plan agent 간 직접 상호작용을 열지"를 데이터 기반으로
-  판단(pm4py 전체 도입 없이 수작업 집계로도 가능한 최소 버전). 열기로 결정되면
-  `interaction_protocol`에 새 edge 항목만 추가(공통 규칙 1 덕분에 게이트 코드 불변).
+- N개 회사, 여러 번의 회의, 의도적 flag/escalation을 포함한 전체 실행 러너 작성.
+- `negotiation_log` 통계를 근거로 `interaction_protocol`의 기준값(`max_exchanges` 등)과 회의 범위가 적절한지 판단(pm4py 전체 도입 없이
+  수작업 집계로도 가능한 최소 버전). 바꾸기로 하면 `interaction_protocol` 값만 바꾼다(공통 규칙 1 덕분에 코드 불변).
 - DESIGN.md는 M0~M7에서 이미 마일스톤별로 갱신돼 왔으므로, M8에서는 "실무 전환 시
   고려사항" 섹션과 남은 TBD 항목(있다면)만 마무리로 채운다.
 
 **검증**
 - N≥3 회사, 최소 1회 검증 flag, 최소 1회 escalation을 포함한 시나리오가 예외 없이 끝까지 실행되는지.
-- `negotiation_log` 통계 근거로 미확정 사항에 결론을 도출했는지.
+- `negotiation_log` 통계 근거로 기준값에 결론을 도출했는지.
 - DESIGN.md 6개 섹션에 더 이상 빈 TBD가 없는지(각 마일스톤에서 이미 채워졌는지 최종 확인).
 
 ## 참고: 문서 내 미확정(TBD) 사항과 배치
 
 - DESIGN.md 6개 섹션 전체 TBD → M0부터 마일스톤마다 점진적으로 채움(공통 규칙 3), M8에서 마무리.
-- 계획agent 간 직접 상호작용 여부 → M5에서는 우회, M8에서 데이터 기반 판단.
-- supply_coordination 우선순위 점수 산출의 순수함수/판단 여부 → M7에서 해소.
+- 회의 구조의 끝나는 조건과 동시 쓰기 → M5 시작 때 먼저 확정.
+- supply_coordination 배분 판단의 순수함수/판단 여부 → M7에서 해소.
+- 실제 병행성 증명과 통계 계산의 스레드·프로세스 분리 여부 → M7.
 - STATE_SCHEMA.md의 `execution_records[]` 분리 설계 → 이번 마일스톤 범위 밖(그래프 노드가
   아닌 외부 경계이므로 실행 layer를 agent화하기 전까지는 다루지 않음).
-- forecast를 거치지 않는 수요(human_input)의 allocation_candidates 반영 구조 → M4.
-- 공급 보장 물량 미충족 시 escalation ↔ sales_channel 통지 순서 → M5에서 확정.
+- 공급 보장 물량 미충족 시 escalation ↔ sales_channel 통지 순서 → M5에서 구현.
 - capacity_pools 집계 수준의 적절성 → M5에서 negotiation_log로 실증 확인.
+- 가동률 0.8의 근거 → 근거 자료를 찾으면 초기값만 다시 계산.
