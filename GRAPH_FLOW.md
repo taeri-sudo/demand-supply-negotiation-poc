@@ -124,6 +124,12 @@ supply_coordination agent에 있다.
 - **채널**: agent마다 채널은 하나이고 이름은 그 agent의 `role_tag`다(검증agent는 검증agent의 role_tag, 사람은 `human_manager`와
   `system_operator`). 신호에는 기록의 위치(`record_path`)가 담기지만 어떤 일을 할지는 담기지 않는다. 받는 쪽은 기록의 상태를 읽어
   할 일을 정한다.
+- **검증 면제 통과**(`exempt_passed`): 검증agent를 거치지 않고 통과한 forecast 기록이다. `selection_basis`가 `human`(사람이
+  escalation을 처리해 넣은 값) 또는 `expiry`(시한이 지나 정해진 처리로 진행한 값)이면 해당한다(아래 "사람 입력과 검증의 무결성").
+  판정 칸(`validation`)에는 검증agent의 판정만 쓰므로 이 기록의 판정 칸은 비어 있다. 왜 면제됐는지는 `selection_basis`가 구분하고,
+  검증 면제 통과는 "검증agent가 검증했는가"만 가른다. 그 뒤 재실행 결과는 `selection_basis`를 새로 쓰므로 다시 검증 대상이 된다.
+  `allocations`에는 `selection_basis`가 없어 해당하지 않는다(판정이 `passed`일 때만 넘긴다).
+- 아래에서 "`passed` 또는 검증 면제 통과"는 기록을 다음 agent에게 넘기거나 "완료"로 둘 수 있는 조건이다.
 - **기록의 상태**는 이미 있는 값에서 계산하며 따로 저장하지 않는다. 상태는 일곱 가지이고, 여러 조건에 해당하면 표의 위쪽 상태가
   우선한다. 아무것도 쓰지 않은 기록(값이 없고 아래 조건에도 해당하지 않음)은 상태가 없다. 기록은 `forecast_records`와
   `allocations`이고, "인스턴스"는 forecast 기록이면 그 인스턴스, `allocations`이면 그 라인이다.
@@ -133,30 +139,31 @@ supply_coordination agent에 있다.
   | 1 | 업무 대기 | 그 인스턴스에 처리되지 않은 `human_manager` 담당 `intervention` escalation 기록이 있음 | `human_manager` |
   | 2 | 시스템 대기 | 그 인스턴스에 처리되지 않은 `system_operator` 담당 escalation 기록이 있음 | `system_operator` |
   | 3 | 되돌려짐 | `send_back`이 있음 | 그 기록의 작성agent의 `role_tag` |
-  | 4 | 전달됨 | 판정이 `passed`이고 `forward_to`가 있음 | `forward_to`의 agent의 `role_tag` |
-  | 5 | 완료 | 판정이 `passed`이고 작성agent의 카드에 `produces`가 없음 | 없음(신호를 보내지 않는다. sales_channel이 읽어 간다) |
-  | 6 | 판정됨 | 판정(`validation.status`: `passed`/`failed`/`error`)이 있음 | 그 기록의 작성agent의 `role_tag` |
-  | 7 | 검증 대기 | 값이 있고 판정이 비어 있으며 `validation_settings`상 검증 대상임 | `validation_settings`의 검증agent `role_tag` |
+  | 4 | 전달됨 | 판정이 `passed` 또는 검증 면제 통과이고 `forward_to`가 있음 | `forward_to`의 agent의 `role_tag` |
+  | 5 | 완료 | 판정이 `passed` 또는 검증 면제 통과이고 작성agent의 카드에 `produces`가 없음 | 없음(신호를 보내지 않는다. sales_channel이 읽어 간다) |
+  | 6 | 판정됨 | 판정(`validation.status`: `passed`/`failed`/`error`)이 있음, 또는 검증 면제 통과 | 그 기록의 작성agent의 `role_tag` |
+  | 7 | 검증 대기 | 값이 있고 판정이 비어 있으며 검증 면제 통과가 아니고 `validation_settings`상 검증 대상임 | `validation_settings`의 검증agent `role_tag` |
 
 - **보내는 쪽**: State 갱신으로 기록의 상태가 바뀌면 그 상태의 담당 채널로 자동으로 신호를 보낸다. 상태를 바꾸지 않는 쓰기(로그
   항목 등)는 신호를 보내지 않는다. 쓰는 쪽이 신호를 따로 지정하지 않는다.
 - **받는 쪽**: 신호를 받으면 기록을 직접 읽고, 지금 상태가 자기가 맡은 상태일 때만 일한다(전달됨은 `forward_to`가 자기일 때). 같은
   채널로 오는 상태가 여럿이면(작성agent는 판정됨과 되돌려짐) 상태를 읽어 할 일을 가른다. 자기 담당이 아니면 넘어간다(늦게 도착한
   신호 포함).
-- **넘김**: `passed` 뒤에 다음 agent로 보내는 일은 작성agent가 다음 agent를 골라 `forward_to`에 쓰는 것이다(아래 "다음 agent 선택").
-  기록이 "전달됨"이 되어 그 agent에게 신호가 가고, 이미 "전달됨"인 기록은 다시 넘기지 않는다(중복 전달 방지는 상태로 판단한다).
-  `forward_to`에는 작성agent의 카드 `known_agents`에 있는 agent만 쓸 수 있고 그 밖의 agent는 쓰기가 거부된다. 카드에 `produces`가
-  없는 agent의 기록은 넘길 곳이 없어 `passed`가 되면 "완료"다.
+- **넘김**: `passed` 또는 검증 면제 통과인 기록을 다음 agent로 보내는 일은 작성agent가 다음 agent를 골라 `forward_to`에 쓰는 것이다(아래 "다음 agent
+  선택"). 기록이 "전달됨"이 되어 그 agent에게 신호가 가고, 이미 "전달됨"인 기록은 다시 넘기지 않는다(중복 전달 방지는 상태로
+  판단한다). `forward_to`에는 작성agent의 카드 `known_agents`에 있는 agent만 쓸 수 있고 그 밖의 agent는 쓰기가 거부된다. 카드에
+  `produces`가 없는 agent의 기록은 넘길 곳이 없어 `passed` 또는 검증 면제 통과가 되면 "완료"다.
 - **되돌림**: 기록을 받은 agent(또는 그 뒤 단계의 agent)가 기록을 쓴 agent에게 되돌리려고 `send_back`을 쓴다. 기록이 "되돌려짐"이 되어
   작성agent에게 신호가 간다. 값 문제(`misrouted`가 아닌 이유)이면 작성agent가 재실행한 결과를 쓸 때 `validation`, `forward_to`,
-  `send_back`이 비어 기록이 "검증 대기"로 돌아간다. `misrouted`이면 재실행하지 않는다(아래 "받는 쪽 반송").
+  `send_back`이 비고 `selection_basis`가 새로 쓰여 기록이 "검증 대기"로 돌아간다. `misrouted`이면 재실행하지 않는다(아래 "받는 쪽 반송").
 
 ### 다음 agent 선택
 
 agent 카드(STATE_SCHEMA.md 8번 절)가 경로 위 agent마다 하는 일(`description`), 받는 것(`accepts`), 내는 것(`produces`), 넘길 수 있는
 agent(`known_agents`)를 담는다. 검증agent와 human_manager는 경로 밖이라 카드가 없다.
 
-1. 작성agent는 `passed`를 확인한 뒤 자기 카드의 `known_agents` 중 그 카드의 `accepts`가 자기 `produces`와 맞는 agent를 후보로 고른다.
+1. 작성agent는 기록이 `passed` 또는 검증 면제 통과(위 "신호 규칙")인지 확인한 뒤 자기 카드의 `known_agents` 중 그 카드의 `accepts`가 자기 `produces`와
+   맞는 agent를 후보로 고른다.
 2. 후보가 하나면 그 agent를 `forward_to`에 쓴다. 후보가 없으면 escalation(`no_next_agent`), 여럿이면 escalation(`multiple_next_agents`)이다
    (둘 다 카드 설정 문제라 `system_operator` 담당 `intervention`이고 기록이 "시스템 대기"가 된다). 여럿일 때 고르는 판단은 M7에서 LLM이 카드의 `description`을 읽고 하며, 그 전에는
    규칙 스텁이 고른다(MILESTONES.md).
@@ -165,7 +172,11 @@ agent(`known_agents`)를 담는다. 검증agent와 human_manager는 경로 밖�
 
 "전달됨" 상태의 기록을 받은 agent가 내용을 보고 자기 일이 아니라고 판단하면(자기 카드의 `accepts`와 맞지 않음) `send_back`에
 `suspected_causes`의 `type: "misrouted"`(문제 내용 없음)를 써서 되돌린다. 작성agent는 `misrouted`를 받으면 재실행하지 않고 다음 agent
-선택만 다시 한다. 같은 기록(같은 판정)에 대해 `misrouted`로 반송한 agent는 후보에서 뺀다. 반송 이력은 반송한 agent의 로그에서 찾는다.
+선택만 다시 한다. 같은 기록에 대해 `misrouted`로 반송한 agent는 후보에서 뺀다. 반송 이력은 반송한 agent의 로그에서 찾는다.
+- "같은 기록"은 같은 판정 또는 같은 escalation 처리로 통과한 기록이다. `passed` 판정으로 통과한 기록은 판정 시각
+  (`validation_ts`)으로, 검증 면제 통과한 기록은 처리 시각(`resolution_ts`)으로 알아본다. 두 시각은 다른 이름으로
+  따로 기록하고(STATE_SCHEMA.md 4번 절), 지금 기록과 같은 종류끼리만 비교한다.
+
 다시 고른 결과가 새 `forward_to`이면 `send_back`을 비우고 새로 넘긴다. 남은 후보가 없으면 `no_next_agent` escalation이다.
 
 ## send-back·재실행 관련 용어
@@ -214,7 +225,7 @@ agent(`known_agents`)를 담는다. 검증agent와 human_manager는 경로 밖�
    - **`error`**(검증 절차 자체가 비정상 종료 — 시스템 장애): 재시도 없이 바로 `escalation_records`에 `system_operator` 담당 escalation
      기록을 만든다(기록이 "시스템 대기"가 되어 system_operator에게 신호가 간다). 기록의 필드 값은 STATE_SCHEMA.md 7번 절을 따른다.
      **그 인스턴스만 멈추고 다른 인스턴스는 진행한다.** 작성agent는 이 판정을 받아도 할 일이 없고, **다음 agent는 이 상태의 레코드를
-     받지 않는다**(작성agent는 `passed`인 기록만 보낸다).
+     받지 않는다**(작성agent는 `passed` 또는 검증 면제 통과인 기록만 보낸다).
 
 ### 사람 입력과 검증의 무결성
 
@@ -229,6 +240,9 @@ agent(`known_agents`)를 담는다. 검증agent와 human_manager는 경로 밖�
 - 사람이 넣은 값은 넣을 때 입력 제한(0 이상, 계약 단위의 배수, 과거 범위를 크게 벗어나면 경고, 같은 입력의 중복 거부)으로
   확인하고, 검증agent를 다시 거치지 않는다. agent 경계를 넘는 제약(공급 가능량 등)은 그 값이 배분으로 들어간 뒤 배분 결론의
   검증에서 확인된다.
+- 검증agent를 다시 거치지 않는다는 것은 판정 칸(`validation`)을 비워 두고 `selection_basis`(`human`)로 표시한다는 뜻이다. 시한이
+  지나 정해진 처리로 값을 정한 경우도 같다(`expiry`). 판정 칸에는 검증agent의 판정만 쓴다. 이 기록을 "검증 면제 통과"라고
+  부르며 정의는 위 "신호 규칙"에 있다.
 
 ## 상호작용 세 가지 유형
 

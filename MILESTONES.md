@@ -286,11 +286,12 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
   실제로 경합하는 상황을 만든다. 이 마일스톤은 여러 인스턴스가 번갈아 진행될 때 결과가 맞는지만 확인한다. 한 인스턴스가 기다리는
   동안 다른 인스턴스가 실제로 진행되는 병행성 증명은 실제 기다림(LLM 응답 대기)이 생기는 M7에서 한다.
 - **State 변경**(STATE_SCHEMA.md): `allocation_candidates`→`allocations`(라인마다 확정된 결론 하나), `capacity_pools`의 식별자를
-  `line_id`로, `forecast_records`에서 `pool_key` 제거, `validation_settings` 추가(최상위 필드 9개), `role_permissions`에 `a`(이어서
-  쓰기 — `role_logs`에 적용), `interaction_protocol`의 `max_rounds`→`max_exchanges`(선택 필드)와 항목 정리(5번 절의 세 항목),
-  `escalation_records`의 `target_role`·`line_id`·`deadline`·`status`·`resolution`.
-- **기록 상태**(GRAPH_FLOW.md "신호 규칙"): 일곱 가지 상태(업무 대기, 시스템 대기, 되돌려짐, 전달됨, 완료, 판정됨, 검증 대기). forecast의
-  `forecast_run_error`·`validation_error`·`no_next_agent`·`multiple_next_agents`는 `system_operator` 담당이다.
+  `line_id`로, `forecast_records`에서 `pool_key` 제거, `forecast_records.selection_basis`에 `expiry` 추가, `validation_settings` 추가
+  (최상위 필드 9개), `role_permissions`에 `a`(이어서 쓰기 — `role_logs`에 적용), `interaction_protocol`의 `max_rounds`→`max_exchanges`
+  (선택 필드)와 항목 정리(5번 절의 세 항목), `escalation_records`의 `target_role`·`line_id`·`deadline`·`status`·`resolution`.
+- **기록 상태**(GRAPH_FLOW.md "신호 규칙"): 일곱 가지 상태(업무 대기, 시스템 대기, 되돌려짐, 전달됨, 완료, 판정됨, 검증 대기)와 검증 면제
+  통과(`exempt_passed`, `selection_basis`가 `human`/`expiry`). forecast의 `forecast_run_error`·`validation_error`·`no_next_agent`·
+  `multiple_next_agents`는 `system_operator` 담당이다.
 - **외부 데이터**(AGENT_NODE_LIST.md "외부 경계"): 수주(앞으로 납기가 올 수주 포함 — 수주 생성기 확장, 고객사 재고 정책이 받지 못한
   주문을 가진 양에 넣는지 확인), 사람이 정한 수량, 계약 조건(최소 구매 약정·공급 보장 물량·계약 단위), 재고·생산 중 물량(고정 파일
   스텁), `line_assignments`(M4는 `primary`만). 라인의 `total_capacity` 초기값(가동률 0.8 임시).
@@ -300,7 +301,7 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
   얹기, 이어지는 조율의 시점(즉시 / 하루 한 번 정해진 시각), 스케줄러.
 - **검증**: `allocation_validation`(배분 합계 ≤ 공급 가능량)을 M3의 공통 틀에 규칙만 더해 구현한다. 검증 대상과 시점은 `validation_settings`에서 읽는다.
 - **escalation 처리**(STATE_SCHEMA.md 7번 절): reason 대응표(담당·긴급도·시한 초과 처리), 사람의 처리 함수(escalation 기록과 값을
-  받는 기록을 한 번의 `update_state`로), 입력 제한, 시한 초과 처리.
+  받는 기록을 한 번의 `update_state`로, 판정 칸은 비워 두고 `selection_basis`로 표시), 입력 제한, 시한 초과 처리.
 - **신호 전달**: 확인 응답 방식(GRAPH_FLOW.md "동시성 모델").
 
 **검증**
@@ -322,10 +323,14 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
   하한으로 쓰이지 않는지.
 - 배분 결론 검증: 배분 합계가 공급 가능량을 넘으면 `failed`이고, 입력이 바뀌었으면 다시 조율, 같으면 `allocation_invalid`
   (`system_operator`)인지. `passed`면 "완료"이고 신호가 가지 않는지.
-- escalation 처리: 사람이 forecast의 reason을 처리하면 요청량이 `scenario`에 들어가고 `selection_basis: "human"`이며 검증agent를 다시
-  거치지 않고 다음 agent로 넘어가는지. 입력 제한을 어긴 값이 거부되는지. 시한이 지나면 reason별 처리(중간값으로 진행, 재실행 전 값으로
-  진행, 예측 수요 없이 진행)대로 되고 `status: "expired"`인지. `system_operator` 담당 reason은 시한 없이 시스템 대기로 남는지. 업무
-  담당자가 `system_operator` 담당 기록을 읽지 못하는지.
+- escalation 처리: 사람이 forecast의 reason을 처리하면 요청량이 `scenario`에 들어가고 `selection_basis: "human"`이며 `validation`이
+  비어 있는데도 기록이 "판정됨"이 되어 검증agent를 다시 거치지 않고 다음 agent로 넘어가는지(검증agent에게 신호가 가지 않는지). 입력
+  제한을 어긴 값이 거부되는지. 시한이 지나면 reason별 처리(중간값으로 진행, 재실행 전 값으로 진행, 예측 수요 없이 진행)대로 되고
+  `status: "expired"`이며, 값으로 진행한 경우 `selection_basis: "expiry"`이고 `validation`이 비어 있는 채로 넘어가는지. 사람의 처리나
+  시한 초과로 넘어간 기록이 그 뒤 재실행되면 `selection_basis`가 새로 쓰여 다시 "검증 대기"가 되는지. `system_operator` 담당 reason은
+  시한 없이 시스템 대기로 남는지. 업무 담당자가 `system_operator` 담당 기록을 읽지 못하는지.
+- 받는 쪽 반송(사람의 처리로 넘어간 기록): `misrouted` 반송 뒤 다시 고를 때 같은 기록인지를 처리 시각(`resolution_ts`)으로 알아보고,
+  판정 시각(`validation_ts`)과 섞어 비교하지 않는지. 로그 `forwarded`·`misrouted_send_back`에 두 시각 중 하나만 채워지는지.
 - 신호 전달: 처리 중 강제로 실패시킨 신호가 확인 시간 뒤 다시 나타나 처리되고, 처리를 확인한 신호는 다시 오지 않는지. 같은 신호가
   두 번 와도 결과가 같은지.
 - `a` 권한: `role_logs`에 이어서 쓰기만 되고 기존 항목을 고치는 쓰기가 거부되는지.

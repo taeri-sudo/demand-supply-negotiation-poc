@@ -72,11 +72,14 @@ forecast agent 인스턴스((회사, item) 조합별 1개)가 State에 남기는
   scenario: { value, assumption_ids, derivation } | null,   # 가정들 중에서 택하거나 계산해 정한 최종 요청량과 출처 가정
                                                             # derivation: "pass_through" | "chosen" | "mean" | "median"
                                                             # 요청량을 만들 수 없으면 null(아래 "요청량을 만들 수 없을 때")
-  selection_basis: "rule" | "agent_judgment" | "human" | null,
+  selection_basis: "rule" | "agent_judgment" | "human" | "expiry" | null,
+                                                            # human: 사람이 escalation을 처리해 넣은 값
+                                                            # expiry: escalation 시한이 지나 정해진 처리로 진행한 값
+                                                            # human·expiry는 검증 면제 통과(GRAPH_FLOW.md "신호 규칙", 7번 절)
   validation: { status: "passed" | "failed" | "error",
                 suspected_causes: [suspected_cause],         # failed일 때 1개 이상, 그 밖에는 빈 목록
-                rationale, ts, validator_role_tag },
-  forward_to: role_tag | null,                              # passed를 확인한 작성agent가 다음 agent를 정해 쓴다
+                rationale, ts, validator_role_tag } | null,  # 검증agent의 판정만 쓴다
+  forward_to: role_tag | null,                              # passed 또는 검증 면제 통과를 확인한 작성agent가 다음 agent를 정해 쓴다
   send_back: { from_role, suspected_causes: [suspected_cause], ts } | null  # 기록을 받은 쪽이 기록을 쓴 agent에게 되돌릴 때 쓴다
 }
 
@@ -183,12 +186,16 @@ forecast 기록에는 이 인스턴스가 어느 생산라인(풀)에 속하는�
 
 `validation`은 **현재값만** 유지(이력 전체는 `role_logs`에 쌓임 —
 판단용 현재값과 기록용 스냅샷 분리). 덮어쓰기 전 값은 재실행의 `rerun` 항목 `payload`에 남는다.
+`validation`에는 검증agent의 판정만 쓴다. 사람이 escalation을 처리해 값을 넣거나 시한이 지나 정해진 처리로 진행한 기록은
+검증agent를 다시 거치지 않으므로 `validation`이 비어 있고 `selection_basis`(`human`/`expiry`)로 구분한다(검증 면제 통과, 7번 절).
 
-`forward_to`는 검증agent의 판정이 `passed`임을 확인한 작성agent가 다음 agent의 role_tag를 골라 써서 넘긴다. 작성agent의 카드(8번 절)
+`forward_to`는 기록이 `passed` 또는 검증 면제 통과(GRAPH_FLOW.md "신호 규칙")인지
+확인한 작성agent가 다음 agent의 role_tag를 골라 써서 넘긴다. 작성agent의 카드(8번 절)
 `known_agents`에 있는 role_tag만 쓸 수 있고 그 밖의 값은 쓰기가 거부된다. `send_back`은 기록을 받은 쪽이 기록을 쓴 agent(작성agent)에게
 되돌릴 때 쓰며, 되돌림은 항상 작성agent에게 간다. `suspected_causes`는 `validation`의 것과 같은 형식이다(검증agent의 `failed`는
 `validation`에, 받은 agent의 되돌림은 `send_back`에 쓴다).
-작성agent가 재실행 결과를 쓸 때는 아직 검증받지 않았으므로 `validation`, `forward_to`, `send_back`을 모두 비운다.
+작성agent가 재실행 결과를 쓸 때는 아직 검증받지 않았으므로 `validation`, `forward_to`, `send_back`을 모두 비운다. `selection_basis`도
+재실행의 가정 선택이 새로 쓰므로, 사람의 처리나 시한 초과로 넘어간 기록도 재실행 뒤에는 다시 검증 대상이 된다.
 이 필드들로 정해지는 기록의 상태와 신호는 GRAPH_FLOW.md "신호 규칙"에 있다.
 
 ### 2. `capacity_pools[]`
@@ -235,7 +242,8 @@ supply_coordination이 조율을 끝내고 쓰는 **확정된 현재 배분**이
 - `peg`: M4는 테스트에서 지정하고, M5부터는 production_plan이 정한다. 생산 중 물량(그 물량이 묶인 수주가 있음)은 `hard`다.
 - `validation`은 `forecast_records`와 같은 형식이다. 새 결론을 쓸 때는 아직 검증받지 않았으므로 `validation`을 비운다.
   supply_coordination의 카드는 `produces`가 없어서(8번 절) `passed`가 되면 이 기록은 "완료" 상태이고(GRAPH_FLOW.md
-  "신호 규칙") sales_channel이 이 값을 읽는다.
+  "신호 규칙") sales_channel이 이 값을 읽는다. 사람이 `commitments_exceed_capacity`를 처리해 넣은 하한 수량은 이 기록에 직접
+  쓰지 않고 다음 조율의 입력이 되므로, 그 조율의 결론은 평소처럼 검증받는다.
 
 ### 4. `role_logs{}`
 역할별 로그 `{role_tag: [entry]}`가 원본이다. 현재값 필드(`forecast_records`, `allocations`)가 판단에 쓰는 지금 상태라면,
@@ -256,11 +264,14 @@ role_logs: { "{role_tag}": [ { seq, ts, role_tag, agent_id | null, event, round 
 - **`payload`에는 역추적에 필요한 값을 담는다.** forecast 재실행(`rerun`)은 재실행의 계기(`trigger`: `failed_verdict` 불합격
   판정 또는 `send_back`), 덮어쓰기 전의 `assumptions`, `scenario`, `selection_basis`, `validation`과 의심되는 원인을 담고,
   판정(`validation_*`)은 `suspected_causes`와 `rationale`과 판정 시각(`validation_ts`)을 담는다. `forecast_run_error`는 실패한
-  단계와 예외 내용을 담는다. `forwarded`는 판정 시각과 `forward_to`를, `next_agent_unresolved`는 `reason`(`no_next_agent`/
-  `multiple_next_agents`)과 후보와 제외한 agent를, `misrouted_send_back`은 되돌린 agent(`from_role`)와 그 기록의 판정
-  시각(`validation_ts`)을 담는다. `allocation_decided`는 `line_id`, 조율에 넣은 수요 목록, 공급 가능량, 단계별 배분 결과
-  (미납분·계약 하한·마진·비율), 마지막 순서로 얹은 값, 덮어쓰기 전의 `allocations` 항목을 담는다. `resolution_applied`는
-  escalation 기록과 넣은 값을, `escalation_expired`는 escalation 기록과 시한 초과 처리 결과를 담는다.
+  단계와 예외 내용을 담는다. `forwarded`는 `forward_to`와, 기록이 통과한 시각을 담는다. `next_agent_unresolved`는
+  `reason`(`no_next_agent`/`multiple_next_agents`)과 후보와 제외한 agent를, `misrouted_send_back`은 되돌린 agent(`from_role`)와
+  그 기록이 통과한 시각을 담는다. "통과한 시각"은 `passed` 판정으로 통과한 기록이면 판정 시각(`validation_ts`),
+  검증 면제 통과한 기록이면 escalation 처리 시각(`resolution_ts` — 사람의 처리는 `resolution.ts`, 시한
+  초과는 그 처리를 한 시각)이고, 둘 중 하나만 채운다(GRAPH_FLOW.md "받는 쪽 반송"). `allocation_decided`는 `line_id`, 조율에
+  넣은 수요 목록, 공급 가능량, 단계별 배분 결과(미납분·계약 하한·마진·비율), 마지막 순서로 얹은 값, 덮어쓰기 전의
+  `allocations` 항목을 담는다. `resolution_applied`는 escalation 기록과 넣은 값을, `escalation_expired`는 escalation 기록과 시한
+  초과 처리 결과를 담는다.
 - **`negotiation_log`는 저장하지 않는다.** `role_logs`의 항목을 `seq` 순으로 합쳐 읽는 함수의 결과이고, 역할 사이에서
   이벤트가 어떻게 겹치거나 어긋나는지 볼 때 쓴다. 이력을 읽는 곳은 모두 이 함수를 쓴다.
 - **로그를 판단에 쓰는 곳**(예: 같은 기록에 `misrouted`로 되돌린 agent 찾기)은 `event` 문자열의 값을 해석하지 않고 사건 이름과
@@ -378,7 +389,7 @@ escalation 기록(사람의 결정이 없으므로 `resolution`이 없음).
 | `selection_unresolved`(가정 선택 ③) | forecast | human_manager | intervention | warning | 규칙이 낸 중간값(`scenario` 그대로)으로 진행 |
 | `options_exhausted`(재실행 전에 계산된 `scenario`가 있었는데 재실행으로 가정이 모두 제외됨. `scenario`와 `assumptions`는 재실행 전 값을 그대로 둠) | forecast | human_manager | intervention | warning | 재실행 전 값으로 진행 |
 | `forecast_run_error`(forecast 실행이 예외로 끝남. 기록은 이전 값 그대로) | forecast | system_operator | intervention | emergency | 없음(처리될 때까지 시스템 대기) |
-| `no_next_agent`(`passed` 뒤에 넘길 후보 agent가 없음) | forecast | system_operator | intervention | warning | 없음 |
+| `no_next_agent`(`passed` 또는 검증 면제 통과 뒤에 넘길 후보 agent가 없음) | forecast | system_operator | intervention | warning | 없음 |
 | `multiple_next_agents`(후보가 여럿이라 고르지 못함. M7 전까지) | forecast | system_operator | intervention | warning | 없음 |
 | `validation_error`(검증 절차가 비정상 종료함) | 검증agent | system_operator | intervention | emergency | 없음 |
 | `commitments_exceed_capacity`(미납분과 계약 하한을 합쳐 라인의 공급 가능량을 넘음) | supply_coordination | human_manager | intervention(`interaction_protocol`에서 바꿀 수 있음) | emergency | 없음(처리될 때까지 그 라인은 이전 결론 유지) |
@@ -402,11 +413,12 @@ escalation 기록(사람의 결정이 없으므로 `resolution`이 없음).
   agent 경계를 넘는 제약(공급 가능량 등)은 그 값이 배분으로 들어간 뒤 배분 결론의 검증에서 확인되므로 사람이 넣은 값은
   검증agent를 다시 거치지 않는다.
 - **반영**: 처리 함수가 escalation 기록의 `status`(`resolved`)·`resolution`과 값을 받는 기록을 한 번의 `update_state`로 쓴다.
-  forecast 기록이면 `scenario.value`에 요청량을, `selection_basis`에 `"human"`을, `validation`에 `status: "passed"`와
-  `validator_role_tag: "human_manager"`를 쓴다. 기록이 "판정됨"이 되어 forecast가 다음 agent로 넘긴다.
+  forecast 기록이면 `scenario.value`에 요청량을, `selection_basis`에 `"human"`을 쓰고 `validation`은 비워 둔다(판정 칸에는
+  검증agent의 판정만 쓴다). 기록이 "판정됨"이 되어(GRAPH_FLOW.md "신호 규칙") forecast가 다음 agent로 넘긴다.
 - **시한 초과**: 시한이 되면 스케줄러가 기록을 만든 agent의 채널로 신호를 보내고, 그 agent는 기록이 아직 `open`이고 시한이
-  지났으면 위 표의 처리를 한다. `status`를 `expired`로 쓰고, 값으로 진행하는 경우 반영 방식은 사람의 처리와 같다
-  (`selection_basis: "rule"`, `validator_role_tag: "escalation_expiry"`).
+  지났으면 위 표의 처리를 한다. `status`를 `expired`로 쓴다. 값으로 진행하는 경우 반영 방식은 사람의 처리와 같고
+  `selection_basis`는 `"expiry"`다(`validation`은 비워 둔다). 예측 수요 없이 진행하는 경우 `scenario`와 `selection_basis`는
+  `null`로 남는다.
 
 ### 8. `agent_cards[]`
 경로 위 agent(supply_coordination, forecast처럼 기록을 받고 넘기는 agent)마다 카드 하나. 다음 agent 선택(GRAPH_FLOW.md
@@ -422,11 +434,11 @@ escalation 기록(사람의 결정이 없으므로 `resolution`이 없음).
 - `response_type`은 GRAPH_FLOW.md "상호작용 세 가지 유형"의 이름이다(`optimization` 최적화, `handoff` 핸드오프형,
   `round_accumulation` 라운드 누적형).
 - 두 agent가 이어지는지는 보내는 쪽의 `known_agents`에 받는 쪽이 있고 받는 쪽의 `accepts`가 보내는 쪽의 `produces`와 같은지로 본다.
-- `produces`는 실행 중에 계산되는 값이 아니라 설계 때 정하는 값이다. `produces`가 없는 agent의 기록은 `passed`가 되면
+- `produces`는 실행 중에 계산되는 값이 아니라 설계 때 정하는 값이다. `produces`가 없는 agent의 기록은 `passed` 또는 검증 면제 통과가 되면
   넘길 곳이 없으므로 "완료"다(GRAPH_FLOW.md "신호 규칙").
 - 지금 카드: `forecast`(`produces`: "검증을 통과한 수요 예측", `known_agents`: `[supply_coordination]`), `supply_coordination`
   (`accepts`: "검증을 통과한 수요 예측", `produces`: null, `known_agents`: `[]`). plan agent 카드와 supply_coordination의
-  `produces`·`known_agents`는 M5에서 더한다.
+  `produces`·`known_agents`는 M5에서 더한다. 검증 면제 통과한 forecast 기록도 같은 카드로 넘긴다.
 
 ### 9. `validation_settings[]`
 어느 agent를 어느 검증agent가 언제 검증하는지를 담는다. 검증 시점의 기준은 하나다 — **agent가 맡은 일이 끝났을 때**. agent마다
@@ -441,7 +453,8 @@ escalation 기록(사람의 결정이 없으므로 `resolution`이 없음).
 - 지금 행: `forecast` → `forecast_validation`(`per_record`), `supply_coordination` → `allocation_validation`(`per_record`). M4에는
   회의가 없어 supply_coordination의 조율 한 번이 `allocations` 기록 한 번이다. M5에서 supply_coordination은 `on_conclusion`으로
   바꾸고 plan agent 행을 더한다.
-- 기록이 "검증 대기"인지와 신호를 받을 검증agent의 채널은 이 표에서 정한다(GRAPH_FLOW.md "신호 규칙").
+- 기록이 "검증 대기"인지와 신호를 받을 검증agent의 채널은 이 표에서 정한다(GRAPH_FLOW.md "신호 규칙"). 검증 면제 통과
+  (`selection_basis`가 `human`/`expiry`)인 forecast 기록은 이 표에 따른 검증 대상이 아니다(1번 절).
 
 ## State 접근 규칙
 

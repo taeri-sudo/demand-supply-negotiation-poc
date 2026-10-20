@@ -210,15 +210,19 @@ asyncio 태스크로 서로 안 막히고 진행, "이벤트 워커풀"은 트�
 
 `send_back`을 쓰는 쪽(받는 agent)과 불합격 판정을 쓰는 쪽(검증agent)은 GRAPH_FLOW.md 참고. forecast는 자기 채널(`forecast`)로 신호를 받으면
 기록을 읽고, 지금 상태가 자기 담당일 때만 일한다:
-- "판정됨": `passed`면 아래 "다음 agent 선택"으로 `forward_to`를 써서 넘기고, `failed`(불합격 판정)면 이 재실행을 한다.
+- "판정됨": `passed`이거나 검증 면제 통과(`selection_basis`가 `human`/`expiry`, 판정 칸은 비어 있음 — GRAPH_FLOW.md "신호 규칙")이면
+  아래 "다음 agent 선택"으로 `forward_to`를 써서 넘기고, `failed`(불합격 판정)면 이 재실행을 한다.
 - "되돌려짐": 이유가 `misrouted`이면 재실행하지 않고 다음 agent 선택만 다시 한다. 그 밖의 이유이면 `send_back.suspected_causes`로 같은
   재실행을 한다.
-- 재실행 결과를 쓸 때 `validation`, `forward_to`, `send_back`을 비운다.
+- 재실행 결과를 쓸 때 `validation`, `forward_to`, `send_back`을 비우고 `selection_basis`는 재실행의 가정 선택이 정한 값으로 쓴다
+  (사람의 처리로 넘어간 기록도 재실행 뒤에는 다시 검증 대상이 된다).
 
-**다음 agent 선택** — `passed`를 확인한 뒤 자기 카드의 `known_agents` 중 그 카드의 `accepts`가 자기 `produces`와 맞는 agent를 후보로
-고른다(GRAPH_FLOW.md "다음 agent 선택"). 후보가 하나면 그 agent를 `forward_to`에 쓰고, 후보가 없으면 `no_next_agent`, 여럿이면
-`multiple_next_agents` escalation이다(여럿일 때의 LLM 판단은 M7). `misrouted` 반송을 받아 다시 고를 때는 그 기록(같은 판정)에 대해 반송한
-agent를 후보에서 뺀다. 반송 이력은 반송한 agent의 로그(`misrouted_send_back`)에서 찾는다.
+**다음 agent 선택** — 기록이 `passed` 또는 검증 면제 통과(GRAPH_FLOW.md "신호 규칙")인지
+확인한 뒤 자기 카드의 `known_agents` 중 그 카드의 `accepts`가 자기 `produces`와 맞는 agent를 후보로 고른다(GRAPH_FLOW.md "다음 agent
+선택"). 후보가 하나면 그 agent를 `forward_to`에 쓰고, 후보가 없으면 `no_next_agent`, 여럿이면 `multiple_next_agents` escalation이다
+(여럿일 때의 LLM 판단은 M7). `misrouted` 반송을 받아 다시 고를 때는 그 기록(같은 판정 또는 같은 escalation 처리)에 대해 반송한 agent를
+후보에서 뺀다. 반송 이력은 반송한 agent의 로그(`misrouted_send_back`)에서 찾고, 판정 시각(`validation_ts`)과 처리 시각(`resolution_ts`)은
+따로 비교한다(GRAPH_FLOW.md "받는 쪽 반송").
 
 **다음 agent 선택 escalation 두 경우** — `no_next_agent`와 `multiple_next_agents`는 카드 설정 문제라 `system_operator` 담당이다.
 `mode: "intervention"`이고 그 인스턴스의 기록이 "시스템 대기"가 된다. 기록의 값(`scenario`, 판정)은 그대로이고 `forward_to`는 비어 있다.
@@ -238,12 +242,12 @@ agent를 후보에서 뺀다. 반송 이력은 반송한 agent의 로그(`misrou
 - 미처리 escalation 기록이 있는 인스턴스는 첫 실행을 포함해 **실행하지 않고** 건너뛴 사실만 forecast 로그에 남긴다
   (`forecast_run_skipped`). 그래서 같은 스냅샷에서 다시 돌려도 escalation 기록이 쌓이지 않고 forecast 기록도 바뀌지 않는다.
   escalation 기록의 `log_seq`는 보류에 들어갈 때 쓴 로그 항목을 가리킨다(STATE_SCHEMA.md 7번 절).
-- **사람이 처리하면**: 처리 함수가 요청량을 `scenario.value`에, `"human"`을 `selection_basis`에 쓰고 `validation`을 `passed`로 쓴다
-  (STATE_SCHEMA.md 7번 절 "사람의 처리"). 기록이 "판정됨"이 되어 forecast가 다음 agent 선택으로 넘긴다. 사람이 넣은 값은 넣을 때
-  입력 제한으로 확인하므로 검증agent를 다시 거치지 않는다.
+- **사람이 처리하면**: 처리 함수가 요청량을 `scenario.value`에, `"human"`을 `selection_basis`에 쓰고 `validation`은 비워 둔다
+  (STATE_SCHEMA.md 7번 절 "사람의 처리" — 판정 칸에는 검증agent의 판정만 쓴다). 기록이 "판정됨"이 되어 forecast가 다음 agent 선택으로
+  넘긴다. 사람이 넣은 값은 넣을 때 입력 제한으로 확인하므로 검증agent를 다시 거치지 않는다.
 - **시한이 지나면**: 스케줄러의 신호를 받은 forecast가, 기록이 아직 `open`이고 시한이 지났으면 위 표의 처리를 하고 `status`를
-  `expired`로 쓴다(로그 `escalation_expired`). 값으로 진행하는 경우 반영 방식은 사람의 처리와 같고 `selection_basis`는 `"rule"`이다.
-  예측 수요 없이 진행하는 경우 기록의 `scenario`는 `null`로 남고 이번 주기 조율은 이 인스턴스를 기다리지 않는다.
+  `expired`로 쓴다(로그 `escalation_expired`). 값으로 진행하는 경우 반영 방식은 사람의 처리와 같고 `selection_basis`는 `"expiry"`다
+  (`validation`은 비워 둔다). 예측 수요 없이 진행하는 경우 기록의 `scenario`는 `null`로 남고 이번 주기 조율은 이 인스턴스를 기다리지 않는다.
 - 요청량 0은 계산된 정상 값이라 escalation이 아니다. `scenario.value = 0`과 `scenario = null`을 구분한다.
 
 **실행 실패** — forecast 실행(첫 실행·재실행)이 예외로 끝나는 시스템 장애 처리다. 판단 결과가 아니라 위 세 경우와 따로 둔다.
@@ -259,7 +263,7 @@ agent를 후보에서 뺀다. 반송 이력은 반송한 agent의 로그(`misrou
 **카드**(`agent_cards`): `description`은 예측 수요·수주·사람이 정한 수량을 생산라인마다 계약 조건과 공급 가능량 안에서 배분하는 일,
 `accepts`는 "검증을 통과한 수요 예측", `produces`는 없음(plan agent 카드와 함께 M5에서 정한다 — 그 전까지는 배분 결론이 `passed`되면
 "완료"), `response_type`은 `optimization`(단방향 최적화), `known_agents`는 `[]`. 넘어온 기록이 자기 `accepts`와 맞지 않으면
-`misrouted`로 되돌린다(GRAPH_FLOW.md "받는 쪽 반송").
+`misrouted`로 되돌린다(GRAPH_FLOW.md "받는 쪽 반송"). 사람의 처리나 시한 초과로 넘어온 forecast 기록도 같은 `accepts`로 받는다.
 
 맡은 일은 **누구에게 얼마를 줄지(배분)**다. 언제 어떻게 만들고 보낼지는 plan agent의 일이라(M5) 배분에 묶음 생산·묶음 배송 같은
 실행 효율을 미리 계산해 넣지 않는다.
@@ -302,7 +306,8 @@ agent를 후보에서 뺀다. 반송 이력은 반송한 agent의 로그(`misrou
 **기록 쓰기와 검증** — 조율 한 번을 끝내고 라인의 결론을 `allocations`에 한 번 쓴다(로그 `allocation_decided`, 덮어쓰기 전 값 포함).
 검증agent `allocation_validation`이 배분 합계가 공급 가능량을 넘지 않는지 본다. `failed`이면 입력(capacity, 재고, 수요)이 판정 때와
 달라졌으면 다시 조율하고, 같으면 배분 로직 오류로 `allocation_invalid` escalation(`system_operator`)이다. 다시 조율하는 것은 입력이
-바뀐 경우뿐이라 반복 횟수는 세지 않는다.
+바뀐 경우뿐이라 반복 횟수는 세지 않는다. 사람이 `commitments_exceed_capacity`를 처리해 넣은 하한 수량은 다음 조율의 입력이 되므로
+그 조율의 결론도 평소처럼 검증받는다.
 
 **조율 시작 규칙** — 어떤 수요가 한 번의 조율에 들어가는지 정하는 규칙은 교체 가능한 class로 둔다(같은 입출력, 구현체만 교체).
 기본 규칙은 GRAPH_FLOW.md "조율 흐름".
@@ -362,7 +367,8 @@ M5에서 정하는 판단 범위:
   다음 agent에게 전달하지 않는 것도 같은 이유다 — 전달하려면 그래프 구조 전체를 알아야 한다. 판정을 쓰면 기록이 "판정됨" 상태가 되어
   작성agent에게 신호가 가고(흐름은 GRAPH_FLOW.md "검증agent"), 라우팅 판단 없이 이미 정해진 목적지로 보내는 일은 작성agent가 한다
 - **받는 신호를 상태로 확인한다**: 검증agent는 신호를 받으면 기록을 직접 읽고 "검증 대기" 상태일 때만 판정한다. 이미 판정됐거나
-  "업무 대기"·"시스템 대기"인 기록의 신호(늦게 도착한 신호 포함)는 아무것도 하지 않고 넘어간다
+  "업무 대기"·"시스템 대기"인 기록, 사람의 처리·시한 초과로 값이 들어온 기록(검증 대상이 아님)의 신호(늦게 도착한 신호 포함)는
+  아무것도 하지 않고 넘어간다
 - **검증 시점은 agent가 맡은 일이 끝났을 때다**: agent 내부 단계는 검증하지 않는다. 어느 agent를 어느 검증agent가 언제 검증하는지는
   `validation_settings`(STATE_SCHEMA.md 9번 절)가 정한다 — forecast는 한 번 실행을 마치고 쓴 기록, supply_coordination은 조율을 끝내고
   쓴 결론(`allocations`), M5의 plan agent는 회의에 쓴 기록마다
@@ -485,7 +491,8 @@ M5에서 정하는 판단 범위:
 ### human_manager (사람, Agent 아님, role_tag: `human_manager`)
 업무 판단을 맡는다(요청량, 계약 하한 조정 등). **알림**(예: 최소 구매 약정과 배분의 차이)은 받기만 하고 진행을 멈추지 않는다.
 알림도 `escalation_records`에 기록되며, `mode: "notice"`로 멈추는 escalation(`mode: "intervention"`)과 구분된다. 자기 담당 기록과
-`allocations`를 읽을 수 있고, `system_operator` 담당 기록은 읽지 않는다.
+`allocations`를 읽을 수 있고, `system_operator` 담당 기록은 읽지 않는다. 넣은 값은 검증agent를 다시 거치지 않으며 판정 칸이 아니라
+`selection_basis`(`human`)로 표시된다(STATE_SCHEMA.md 7번 절).
 
 ### system_operator (사람, Agent 아님, role_tag: `system_operator`)
 시스템 오류(실행 실패, 검증 절차 오류, 카드 설정 문제, 배분 로직 오류)를 맡는다. 고친 뒤 `rerun` 또는 `dismiss`로 처리한다. 원인을
