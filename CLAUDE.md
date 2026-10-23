@@ -22,7 +22,7 @@ JOURNAL.md는 매 세션 통째로 읽지 않는다. 다음 상황에서만 확�
 
 ## 참고 문서
 
-- **STATE_SCHEMA.md** — State 8개 최상위 필드 스키마. State 관련 코드 작업 전 확인.
+- **STATE_SCHEMA.md** — State 최상위 필드 스키마(개수는 문서 첫머리에 있다). State 관련 코드 작업 전 확인.
 - **AGENT_NODE_LIST.md** — agent/역할(role_tag) 목록, 각자의 판단 범위, 검증agent 작성
   원칙. agent 관련 코드 작업 전 확인. **새 agent/역할을 추가하기 전, 여기 기준으로
   기존 agent에 흡수될 수 있는지 먼저 검토한다.**
@@ -102,12 +102,13 @@ STATE_SCHEMA.md, AGENT_NODE_LIST.md, GRAPH_FLOW.md, MILESTONES.md를 쓰거나 �
   `set_field`)를 통해서만 한다. 직접 State를 건드리지 않는다.
 - 소스 코드는 src/sop/ 패키지 아래에 있다
 - agent 간 상호작용(엣지)을 구현하는 모듈의 파일명·함수명은 `interaction_protocol`의
-  edge 이름을 따른다(예: `forecast<->supply_coordination` →
-  `forecast_supply_round.py`의 `run_forecast_supply_round`). 여러 edge/단계를
-  묶는 상위 진입점 함수는 그 동작을 그대로 드러내는 이름을 쓴다(예:
-  candidate 선택과 라운드 협상을 잇는 함수는 `run_forecast_select_and_round`
-  처럼 두 동작을 나열하거나, 감싸는 함수명들을 그대로 딴다). "negotiation"처럼
-  `negotiation_log`(필드명)·리포 이름(-negotiation-poc)과 겹치는 범용 단어는 
+  edge 이름을 따른다(예: `forecast->human_manager` → `forecast_human_manager.py`,
+  `supply_coordination->human_manager` → `supply_coordination_human_manager.py`).
+  여러 edge/단계를 묶는 상위 진입점 함수는 그 동작을 그대로 드러내는 이름을 쓴다(예:
+  내부 단계 실행과 가정 선택과 State 제출을 잇는 함수는
+  `run_forecast_steps_select_and_submit`처럼 동작을 나열하거나, 감싸는 함수명들을
+  그대로 딴다). "negotiation"처럼
+  `negotiation_log`(`role_logs`를 합쳐 읽은 결과의 이름)·리포 이름(-negotiation-poc)과 겹치는 범용 단어는 
   파일명·함수명 어디에도 쓰지 않는다.
   - 코드 주석과 docstring에는 현재 동작과 그 이유만 쓴다. 삭제된 기능이나 바뀐 경위("~는 ~가 아니다", "처음에는 ~였다")는 쓰지 않는다. 경위는 JOURNAL.md에 남긴다.
 

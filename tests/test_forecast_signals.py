@@ -147,3 +147,27 @@ async def test_a_signal_for_an_instance_without_runtime_inputs_is_an_error():
 
     with pytest.raises(ValueError):
         await handle_forecast_signal(store, {"record_path": "forecast_records[0]"}, {})
+
+
+@pytest.mark.parametrize("keep_previous", [True, False])
+async def test_a_rerun_without_the_previous_result_rebuilds_it_from_the_same_inputs(keep_previous):
+    from sop.forecast_signals import run_first_run
+
+    async def judged_and_rerun(keep: bool):
+        store = one_instance_store()
+        runtime = ForecastInstanceRuntime(make())
+        await run_first_run(store, runtime)
+        if not keep:
+            runtime.handling = None  # 첫 실행 없이 재시작해 직전 결과가 메모리에 없다
+        process_pending_validations(store, VALIDATOR_ROLE_TAG, forecast_rules(lambda company, item: [1.0, 2.0]))  # 두 가정 모두 범위 밖 → 불합격
+        messages = take(store)
+        outcomes = [await handle_forecast_signal(store, m, {KEY: runtime}) for m in messages]
+        record = store.state.forecast_records[0]
+        return outcomes, record.scenario, record.assumptions, [r.reason for r in store.state.escalation_records], runtime
+
+    reference = await judged_and_rerun(True)
+    outcome, scenario, assumptions, reasons, runtime = await judged_and_rerun(keep_previous)
+
+    assert outcome == reference[0] and set(outcome) == {"rerun"}  # 직전 결과가 있든 없든 재실행이 일어난다
+    assert (scenario, assumptions, reasons) == reference[1:4]  # 같은 입력이라 같은 결과다
+    assert runtime.handling is not None  # 재실행에 쓴 직전 결과를 이 객체가 다시 보관한다

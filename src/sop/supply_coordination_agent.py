@@ -35,6 +35,7 @@ from .escalation_records import is_dismissed
 from .forecast_supply_allocation import receive_forwarded_forecast
 from .logging_utils import log
 from .record_state import HOLD_STATES
+from .scheduler import SCHEDULER_ROLE_TAG
 from .supply_coordination_line import check_allocation_verdict, find_allocation_index
 
 ROLE_TAG = "supply_coordination"
@@ -170,6 +171,21 @@ class SupplyCoordinator:
 
 
 def notify_line_changed(store: StateStore, line_id: str, written_by: str = "sales_channel", role_tag: str = ROLE_TAG) -> None:
-    """외부 데이터(수주, 사람이 정한 수량 등)가 바뀌었다는 sales_channel의 알림. 그 라인의 `allocations` 기록을 가리키는 신호를 보낸다."""
+    """외부 데이터(수주, 사람이 정한 수량 등)가 바뀌었다는 알림. 그 라인의 `allocations` 기록을 가리키는 신호를 보낸다.
+
+    `written_by`는 값을 바꾼 쪽이다. 수주처럼 자동으로 들어오는 값은 sales_channel, 사람이 넣은 값은 그 사람이다.
+    """
     index = find_allocation_index(store, role_tag, line_id)
     store.queue(role_tag).put_nowait(signal(f"allocations[{index}]", written_by))
+
+
+def notify_cycle_started(store: StateStore, written_by: str = SCHEDULER_ROLE_TAG, role_tag: str = ROLE_TAG) -> list[str]:
+    """계획 주기가 시작될 때 스케줄러가 모든 라인에 외부 데이터 변경 알림을 한 번씩 보내고 알린 라인을 돌려준다.
+
+    기록의 상태가 바뀔 때만 신호가 가므로, forecast 인스턴스가 없는 라인은 이 알림이 없으면 정기 조율을 시작할 신호를 받지 못한다
+    (정해진 조율 시각의 신호는 하루 한 번이라 그때까지 기다리게 된다). 주기가 시작될 때 받은 외부 데이터 스냅샷이 입력의 시작점이다.
+    """
+    lines = [pool.line_id for pool in store.get_field(role_tag, "capacity_pools")]
+    for line_id in lines:
+        notify_line_changed(store, line_id, written_by, role_tag)
+    return lines

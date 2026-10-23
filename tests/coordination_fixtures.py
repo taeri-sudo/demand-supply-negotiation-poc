@@ -77,7 +77,7 @@ def make_store(
     pools = [CapacityPool(line_id=line, total_capacity=value, remaining_capacity=value) for line, value in capacity.items()]
     extra = [
         (SUPPLY, "forecast_records", "r"), (SUPPLY, "forecast_records[*].send_back", "w"), (SUPPLY, "escalation_records", "r"),
-        (SCHEDULER, "escalation_records", "r"), (SCHEDULER, "role_logs", "r"),
+        (SCHEDULER, "escalation_records", "r"),
         (HUMAN, "allocations", "r"), (SYSTEM, "capacity_pools", "r"),
     ]
     all_permissions = [

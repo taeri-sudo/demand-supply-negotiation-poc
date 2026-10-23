@@ -87,6 +87,9 @@ def test_the_scheduler_reads_only_and_cannot_write_the_state():
     store = make_store()
     with pytest.raises(PermissionDenied):
         store.update_state(SCHEDULER, fields=[FieldWrite("escalation_records", [])])
+    with pytest.raises(PermissionDenied):
+        store.get_field(SCHEDULER, "role_logs")  # 시한을 보는 데 필요한 것은 escalation 기록 읽기뿐이다
+    store.get_field(SCHEDULER, "escalation_records")
 
 
 def test_the_wait_until_the_next_signal_is_bounded():

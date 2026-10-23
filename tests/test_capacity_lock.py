@@ -98,3 +98,24 @@ async def test_adjust_capacity_pool_helper_is_safe_under_concurrency():
     pool = store.get_field("supply_coordination", "capacity_pools")[0]
     assert pool.remaining_capacity == 50
     assert len(pool.adjustment_history) == 10
+
+
+async def test_concurrent_adjustments_by_the_production_role_are_all_applied_and_the_coordination_role_cannot_write():
+    """M4: `remaining_capacity`를 증감하는 쪽은 production_plan(을 대신하는 역할)이고 supply_coordination은 읽기만 한다."""
+    from sop.access import FieldWrite, PermissionDenied
+
+    permissions = [
+        RolePermission(role_tag="production_plan", field_path="capacity_pools", access="r"),
+        RolePermission(role_tag="production_plan", field_path="capacity_pools", access="w"),
+        RolePermission(role_tag="supply_coordination", field_path="capacity_pools", access="r"),
+    ]
+    store = StateStore(State(capacity_pools=[CapacityPool(line_id="LINE-1", total_capacity=100, remaining_capacity=100)], role_permissions=permissions))
+
+    await asyncio.gather(*(adjust_capacity_pool(store, "production_plan", "LINE-1", delta=-5, reason="test") for _ in range(10)))
+
+    pool = store.get_field("supply_coordination", "capacity_pools")[0]
+    assert pool.remaining_capacity == 50 and len(pool.adjustment_history) == 10
+    with pytest.raises(PermissionDenied):
+        store.update_state("supply_coordination", fields=[FieldWrite("capacity_pools[0]", pool.model_copy(update={"remaining_capacity": 0}))])
+    with pytest.raises(PermissionDenied):
+        await adjust_capacity_pool(store, "supply_coordination", "LINE-1", delta=-5, reason="test")

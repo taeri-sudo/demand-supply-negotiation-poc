@@ -279,7 +279,8 @@ role_logs: { "{role_tag}": [ { seq, ts, role_tag, agent_id | null, event, round 
   그 기록이 통과한 시각을 담는다. "통과한 시각"은 `passed` 판정으로 통과한 기록이면 판정 시각(`validation_ts`),
   검증 면제 통과한 기록이면 escalation 처리 시각(`resolution_ts` — 사람의 처리는 `resolution.ts`, 시한
   초과는 그 처리를 한 시각)이고, 둘 중 하나만 채운다(GRAPH_FLOW.md "받는 쪽 반송"). `allocation_decided`는 `line_id`, 조율의 종류(`kind`:
-  정기 `regular`/이어지는 `continuing`), 조율에 넣은 입력(`inputs`, 변경은 이 입력과의 차이로 계산한다), 공급 가능량, 단계별 배분 결과(미납분·계약 하한·마진·비율), 마지막 순서로 얹은 값, 덮어쓰기 전의
+  정기 `regular`/이어지는 `continuing`), 조율에 넣은 입력(`inputs`, 변경은 이 입력과의 차이로 계산한다), 공급 가능량, 단계별 배분 결과(미납분·계약 하한·마진·비율), 마지막 순서로 얹은 값,
+  사람이 처리해 넣은 하한·묶임 수량 중 조율 시점에 그 수요가 없어져 무시한 값의 `demand_ref` 목록(`ignored_resolution_refs`, 무시한 값이 없으면 빈 목록), 덮어쓰기 전의
   `allocations` 항목을 담는다. `resolution_applied`는 escalation 기록과 넣은 값(forecast 기록이면 덮어쓰기 전 `scenario` 포함)을, `escalation_expired`는 escalation 기록과 시한
   초과 처리 결과, 처리한 시각(`expired_at`)을 담는다.
 - **`negotiation_log`는 저장하지 않는다.** `role_logs`의 항목을 `seq` 순으로 합쳐 읽는 함수의 결과이고, 역할 사이에서
@@ -366,6 +367,8 @@ State 필드 단위 접근권한(agent 간, Unity Catalog의 시스템 접근통
 - `escalation_records`: 기록을 만드는 agent는 새 기록을 더한다(a). 사람의 처리 함수와 시한 초과 처리는 `status`와 `resolution`을
   쓴다(7번 절). 담당별 읽기 범위(업무 담당자는 자기 담당 기록만, `system_operator`는 전부)는 행 단위라 `role_permissions`가
   아니라 escalation 기록을 읽는 함수가 `target_role`로 거른다.
+- `scheduler`(스케줄러 태스크): `escalation_records`(r)뿐이다. 시한이 지났는데 처리되지 않은 기록을 찾아 기록을 만든 agent의 채널로 신호를
+  보내는 데만 쓰고 State에는 쓰지 않는다. 정해진 조율 시각의 신호는 State를 읽지 않고 보낸다(GRAPH_FLOW.md "신호 규칙").
 
 ### 7. `escalation_records[]`
 사람에게 올라간 escalation 기록. 사람은 둘이다 — `human_manager`(업무 판단)와 `system_operator`(시스템 오류). `mode`로 종류를

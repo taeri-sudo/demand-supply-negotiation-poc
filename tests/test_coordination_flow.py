@@ -90,6 +90,26 @@ async def test_an_instance_waiting_for_validation_or_rerun_is_still_processing(s
     assert [r.outcome for r in await pump(agent)] == ["waiting"]  # 재실행 중인 인스턴스의 결과가 같은 조율에 들어가도록 기다린다
 
 
+async def test_the_result_of_an_instance_rerun_after_a_failed_verdict_goes_into_the_same_regular_coordination():
+    from sop.access import FieldWrite
+    from sop.state import ForecastRecord, Scenario, SuspectedCause, ValidationResult
+
+    store, data = make_store(instances=(("A", "I1"), ("B", "I1"))), Data()
+    agent = coordinator(store, data)
+    deliver(store, "A", "I1", 600)
+    failed = ForecastRecord(
+        agent_id="B:I1", company_id="B", item_id="I1", scenario=Scenario(value=3000, assumption_ids=["a"], derivation="chosen"), selection_basis="rule",
+        validation=ValidationResult(status="failed", suspected_causes=[SuspectedCause(type="method_selection")], ts="2017-08-15T00:00:00+00:00"),
+    )
+    store.update_state("forecast", fields=[FieldWrite("forecast_records[1]", failed)])  # 불합격이라 forecast가 재실행 중이다
+    assert [r.outcome for r in await pump(agent)] == ["waiting"] and len(decided(store)) == 0
+
+    deliver(store, "B", "I1", 300)  # 재실행 결과가 검증을 통과해 넘어온다
+    await pump(agent)
+
+    assert kinds(store) == ["regular"] and entries_by_ref(store, "L1") == {("A:I1", "soft"): 600, ("B:I1", "soft"): 300}  # 불합격한 값 3000이 아니라 재실행 결과가 든다
+
+
 async def test_an_instance_that_enters_a_hold_does_not_block_the_line_and_is_added_when_it_is_resolved():
     store, data = make_store(instances=(("A", "I1"), ("B", "I1"))), Data()
     agent = coordinator(store, data)
@@ -374,3 +394,184 @@ async def test_a_pegged_exceed_resolution_reduces_the_hard_quantity_in_the_next_
 
     after = entries_by_ref(store, "L1")
     assert after[("A:I1", "hard")] == 240 and after.get(("A:I1", "soft"), 0) <= 160
+
+
+# --- 결론 직전 확인에서 얹은 값으로 하한 초과가 나는 경우 -----------------------------------------------------------------------
+
+
+async def test_a_late_value_that_makes_the_floors_exceed_the_supply_holds_the_line_and_keeps_the_previous_conclusion():
+    store, data = make_store(instances=(("A", "I1"),), capacity={"L1": 1000.0, "L2": 1000.0}), Data()
+    calls = []
+
+    async def while_computing(line_id: str) -> None:
+        calls.append(line_id)
+        if len(calls) == 2:  # 두 번째 조율(이어지는 조율)을 계산하는 동안 미납분과 약정이 들어온다
+            exceeding_data(data)
+
+    agent = coordinator(store, data, compute_delay=while_computing)
+    deliver(store, "A", "I1", 600)
+    await pump(agent)
+    previous = store.state.allocations[0]
+    assert entries_by_ref(store, "L1") == {("A:I1", "soft"): 600}
+
+    data.add("L1", "manual", manual("M1", None, "I2", 12))
+    notify_line_changed(store, "L1")
+    results = await pump(agent)
+
+    assert [r.outcome for r in results] == ["escalated"]  # 계산할 때의 입력으로는 배분이 됐지만, 얹은 값 때문에 하한이 공급을 넘는다
+    assert store.state.allocations[0] == previous and line_state(store, "L1") == "awaiting_business"  # 이전 결론을 유지하고 그 라인만 보류한다
+    (hold,) = [r for r in store.state.escalation_records if r.reason == "commitments_exceed_capacity"]
+    assert hold.line_id == "L1" and hold.mode == "intervention"
+    held = next(e for e in store.negotiation_log(SUPPLY) if e.event == "allocation_escalated")
+    assert hold.log_seq == held.seq
+    assert {c["kind"] for c in held.payload["late_changes"]} >= {"order", "commitments"}  # 마지막 순서로 얹은 변경이 로그에 남는다
+    assert [o["demand_id"] for o in held.payload["inputs"]["orders"]] == ["ORD"]  # 로그의 입력은 얹은 값이 들어간 확인에서 읽은 입력이다
+    assert len(decided(store)) == 1  # 새 결론은 쓰이지 않았다
+
+    resolve_escalation(store, HUMAN, escalation_index(store, "commitments_exceed_capacity"), kind="value", value={"A:I1": 300.0}, floor_unit_of=lambda ref: 6.0)
+    await pump(agent)
+
+    assert entries_by_ref(store, "L1")[("ORD", "soft")] == 600 and len(decided(store)) == 2  # 사람이 하한을 줄이면 같은 입력으로 조율된다
+
+
+# --- forecast 인스턴스가 없는 라인 ----------------------------------------------------------------------------------------------
+
+
+def no_instance_line():
+    """L1에는 forecast 인스턴스(A:I1)가 있고 L2(item I3)에는 없다. L2에는 앞으로 납기가 올 수주가 있다."""
+    store, data = make_store(instances=(("A", "I1"),)), Data()
+    data.set("L2", orders=[order("O3", "B", "I3", 60, OUTSIDE_FREEZE)])
+    return store, data, coordinator(store, data)
+
+
+async def test_a_line_without_forecast_instances_never_gets_a_state_signal_so_nothing_starts_by_itself():
+    store, data, agent = no_instance_line()
+
+    assert await pump(agent) == [] and store.state.allocations[1].cycle is None
+
+
+async def test_a_line_without_forecast_instances_starts_its_regular_coordination_from_a_change_notice():
+    store, data, agent = no_instance_line()
+
+    notify_line_changed(store, "L2")
+    results = await pump(agent)
+
+    assert [r.outcome for r in results] == ["coordinated"]  # 기다릴 forecast 인스턴스가 없어 시작 규칙이 바로 허락한다
+    assert entries_by_ref(store, "L2") == {("O3", "soft"): 60} and kinds(store, "L2") == ["regular"]
+    assert store.state.allocations[0].cycle is None  # 다른 라인(L1)은 자기 인스턴스를 기다린다
+
+
+async def test_a_line_without_forecast_instances_starts_its_regular_coordination_from_the_daily_time_signal():
+    store, data, agent = no_instance_line()
+
+    send(agent, DAILY)
+    results = await pump(agent)
+
+    assert [r.outcome for r in results] == ["waiting", "coordinated"]  # 라인 순서대로 확인한다: L1은 A:I1을 기다리고 L2는 시작한다
+    assert entries_by_ref(store, "L2") == {("O3", "soft"): 60} and kinds(store, "L2") == ["regular"] and kinds(store) == []
+
+
+async def test_the_cycle_start_notifies_every_line_once_and_only_lines_that_can_start_coordinate():
+    from sop.supply_coordination_agent import notify_cycle_started
+
+    store, data, agent = no_instance_line()
+
+    assert notify_cycle_started(store) == ["L1", "L2"]
+    queue = store.queue(SUPPLY)
+    assert queue.qsize() == 2
+    results = await pump(agent)
+
+    assert [r.outcome for r in results] == ["waiting", "coordinated"]
+    assert await pump(agent) == []  # 알림은 한 번씩이다
+    deliver(store, "A", "I1", 600)
+    assert [r.outcome for r in await pump(agent)] == ["coordinated"]  # 기다리던 L1은 자기 인스턴스가 전달되면 시작한다
+
+
+async def test_the_cycle_start_notices_are_written_by_the_scheduler():
+    from sop.supply_coordination_agent import notify_cycle_started
+
+    store, data, agent = no_instance_line()
+
+    notify_cycle_started(store)
+    senders = {store.queue(SUPPLY).get_nowait()["written_by"] for _ in range(2)}
+
+    assert senders == {"scheduler"}
+
+
+# --- 여러 인스턴스와 실행 순서 ------------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("order_of_delivery", [
+    [("A", "I1"), ("B", "I1"), ("A", "I2"), ("A", "I3")],
+    [("A", "I3"), ("A", "I2"), ("B", "I1"), ("A", "I1")],
+    [("B", "I1"), ("A", "I3"), ("A", "I1"), ("A", "I2")],
+])
+async def test_the_allocation_does_not_depend_on_the_order_the_instances_finish(order_of_delivery):
+    async def run(sequence):
+        store, data = make_store(capacity={"L1": 900.0, "L2": 100.0}), Data()
+        data.set("L1", orders=[order("O1", "B", "I1", 60, INSIDE_FREEZE)], commitments=[commitment("A", "I1", 600)])
+        agent = coordinator(store, data)
+        values = {("A", "I1"): 600, ("B", "I1"): 300, ("A", "I2"): 300, ("A", "I3"): 300}
+        for company, item in sequence:
+            deliver(store, company, item, values[company, item])
+            await pump(agent)
+        return {line: entries_by_ref(store, line) for line in ("L1", "L2")}, [len(kinds(store, line)) for line in ("L1", "L2")]
+
+    reference = await run([("A", "I1"), ("B", "I1"), ("A", "I2"), ("A", "I3")])
+
+    assert await run(order_of_delivery) == reference
+    assert sum(reference[0]["L1"].values()) <= 900.0 and sum(reference[0]["L2"].values()) <= 100.0  # 공급 가능량(재고 0)을 넘지 않는다
+    assert reference[1] == [1, 1]  # 처리 중인 인스턴스를 기다렸다가 라인마다 정기 조율 한 번
+
+
+async def test_capacity_changes_by_the_production_role_stay_exact_while_the_lines_are_coordinated():
+    import asyncio
+
+    from sop.capacity import adjust_capacity_pool
+
+    async def yield_control(line_id: str) -> None:
+        await asyncio.sleep(0)
+
+    store, data = make_store(instances=(("A", "I1"), ("A", "I3")), capacity={"L1": 1000.0, "L2": 1000.0}), Data()
+    agent = coordinator(store, data, compute_delay=yield_control)
+    deliver(store, "A", "I1", 600)
+    deliver(store, "A", "I3", 300)
+
+    await asyncio.gather(pump(agent), *(adjust_capacity_pool(store, "production_plan", "L1", -10.0, "테스트") for _ in range(20)))
+
+    pool = store.state.capacity_pools[0]
+    assert pool.remaining_capacity == 800.0 and len(pool.adjustment_history) == 20  # 조율은 capacity를 바꾸지 않고, 증감은 하나도 유실되지 않는다
+    assert store.state.capacity_pools[1].remaining_capacity == 1000.0 and len(decided(store)) == 2
+
+
+# --- 사람이 처리한 보류 인스턴스가 이어지는 조율로 들어오는 경로 ------------------------------------------------------------------
+
+
+async def test_a_held_instance_resolved_by_a_person_skips_the_validator_and_takes_the_remaining_supply_then_moves_it_from_its_own_item():
+    """같은 라인(L1)에서 같은 item(I1)을 고객사 A·B가 쓰고, 다른 item(I2)도 있다. 공급이 모자라는 상태에서 A:I1이 보류됐다가 사람이 처리한다."""
+    store, data = make_store(instances=(("A", "I1"), ("B", "I1"), ("A", "I2")), capacity={"L1": 900.0, "L2": 1000.0}), Data()
+    agent = coordinator(store, data)
+    open_hold(store, "A:I1", "selection_unresolved")  # 가정 선택 ③으로 보류된 인스턴스
+    deliver(store, "B", "I1", 600)
+    deliver(store, "A", "I2", 300)
+    await pump(agent)
+    assert entries_by_ref(store, "L1") == {("B:I1", "soft"): 600, ("A:I2", "soft"): 300}  # 보류 중인 인스턴스를 기다리지 않고 공급을 다 쓴다
+    other_line_before = store.state.allocations[1]
+
+    resolve_escalation(store, HUMAN, 0, kind="value", value=300.0, unit_of=lambda company, item: 6.0)
+    record = store.state.forecast_records[0]
+    assert (record.selection_basis, record.validation) == ("human", None)  # 판정 칸은 비어 있고 검증 면제 통과다
+    assert store.queue("forecast_validation").qsize() == 0  # 검증agent에게 신호가 가지 않는다
+    forward_after_resolution(store, "A", "I1")
+    assert store.record_state(SUPPLY, "forecast_records[0]") == "forwarded"
+    await pump(agent)
+
+    after = entries_by_ref(store, "L1")
+    assert kinds(store) == ["regular", "continuing"]
+    assert after[("A:I2", "soft")] == 300  # 다른 item의 약한 묶임은 옮겨지지 않는다
+    # 남은 공급이 없어 같은 item을 쓰는 두 고객사가 I1에 배정됐던 600을 요청량 비율(300:600)로 나눈다(계약 단위 6으로 내림)
+    assert (after[("A:I1", "soft")], after[("B:I1", "soft")]) == (198, 396)
+    assert sum(after.values()) <= 900  # 합계는 공급 가능량 안이다
+    assert store.state.allocations[1] == other_line_before  # 다른 라인은 건드리지 않는다
+    validated = [e for e in store.negotiation_log(SUPPLY) if e.event == "allocation_decided"][-1]
+    assert validated.payload["kind"] == "continuing" and validated.payload["judgment"]["touched_items"] == ["I1"]

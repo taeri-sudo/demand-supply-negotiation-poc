@@ -6,7 +6,7 @@
   `system_operator`가 `rerun`으로 처리했으면 첫 실행을 다시 한다.
 - `escalation_records[i]`: 스케줄러가 보낸 시한 신호. 시한이 지난 forecast의 escalation 기록의 시한 초과 처리를 한다.
 
-이번 주기에서 뺀(`dismiss`) 인스턴스와 시한 초과로 예측 수요 없이 끝난 인스턴스는 실행하지도 재실행하지도 않는다. 인스턴스 입력은 호출한 쪽이
+보류(업무 대기·시스템 대기) 중인 인스턴스는 건너뛰고 로그(`forecast_run_skipped`)만 남긴다. 이번 주기에서 뺀(`dismiss`) 인스턴스와 시한 초과로 예측 수요 없이 끝난 인스턴스는 실행하지도 재실행하지도 않는다. 인스턴스 입력은 호출한 쪽이
 (회사, item)마다 `ForecastInstanceRuntime`으로 넘기고, 재실행에 쓰는 직전 결과는 그 객체 안에만 있다(State에 두지 않는다).
 """
 
@@ -20,8 +20,9 @@ from .escalation_records import expired_without_demand, is_dismissed
 from .external_data import InstanceInputs
 from .forecast_escalation_expiry import expire_forecast_escalation
 from .forecast_steps import ForecastRerunHandling, run_forecast_steps
-from .forecast_supply_allocation import check_forecast_verdict, run_forecast_steps_select_and_submit
+from .forecast_supply_allocation import check_forecast_verdict, run_forecast_steps_select_and_submit, skip_if_held
 from .logging_utils import log
+from .record_state import HOLD_STATES
 
 ROLE_TAG = "forecast"
 
@@ -56,7 +57,7 @@ async def handle_forecast_signal(
     now: datetime | None = None,
     role_tag: str = ROLE_TAG,
 ) -> str:
-    """신호 하나를 처리하고 결과를 돌려준다: `"first_run"`, `"expired"`, `"dismissed"`, `"no_demand"`, `"skipped"` 또는 `check_forecast_verdict`의 결과."""
+    """신호 하나를 처리하고 결과를 돌려준다: `"first_run"`, `"expired"`, `"dismissed"`, `"no_demand"`, `"held"`, `"skipped"` 또는 `check_forecast_verdict`의 결과."""
     path: str = message["record_path"]
     if path.startswith("escalation_records["):
         index = int(path[path.index("[") + 1 : -1])
@@ -72,6 +73,9 @@ async def handle_forecast_signal(
         log(role_tag, "handle_forecast_signal", agent_id=record.agent_id, skipped="dismissed")
         return "dismissed"
     state = store.record_state(role_tag, record_path)
+    if state in HOLD_STATES:  # 처리되지 않은 보류가 있는 인스턴스는 첫 실행을 포함해 실행하지 않고 건너뛴 사실만 남긴다
+        skip_if_held(store, role_tag, record.agent_id, "signal")
+        return "held"
     if state == "none":
         if record.scenario is None and expired_without_demand(escalations, record.agent_id):
             return "no_demand"  # 시한이 지나 예측 수요 없이 끝났다

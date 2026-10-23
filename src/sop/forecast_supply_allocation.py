@@ -91,7 +91,7 @@ def _find_forecast_record_index(
     )
 
 
-def _skip_if_held(store: StateStore, forecast_role_tag: str, agent_id: str, run_kind: str) -> bool:
+def skip_if_held(store: StateStore, forecast_role_tag: str, agent_id: str, run_kind: str) -> bool:
     """처리되지 않은 `intervention` escalation 기록이 있는 인스턴스는 첫 실행을 포함해 실행하지 않고, 건너뛴 사실만 forecast 로그에
     남긴다(`forecast_run_skipped`). 건너뛰었으면 True를 반환한다."""
     open_reasons = [
@@ -239,7 +239,7 @@ async def run_forecast_select_and_submit(
     """
     record_index = _find_forecast_record_index(store, forecast_role_tag, company_id, item_id)
     agent_id = store.get_field(forecast_role_tag, f"forecast_records[{record_index}]").agent_id
-    if _skip_if_held(store, forecast_role_tag, agent_id, "select"):
+    if skip_if_held(store, forecast_role_tag, agent_id, "select"):
         return False
     plan = _plan_selection(
         store, forecast_role_tag, company_id, item_id, assumptions, no_assumption_rationale, after_rerun, base_record
@@ -413,7 +413,7 @@ async def run_forecast_steps_select_and_submit(
     """
     record_index = _find_forecast_record_index(store, forecast_role_tag, inputs.company_id, inputs.item_id)
     agent_id = store.get_field(forecast_role_tag, f"forecast_records[{record_index}]").agent_id
-    if _skip_if_held(store, forecast_role_tag, agent_id, "first_run"):
+    if skip_if_held(store, forecast_role_tag, agent_id, "first_run"):
         return None, False
     tracker = StageTracker()
 
@@ -463,7 +463,7 @@ async def rerun_forecast_steps_select_and_submit(
     inputs = handling.inputs
     record_index = _find_forecast_record_index(store, forecast_role_tag, inputs.company_id, inputs.item_id)
     stored = store.get_field(forecast_role_tag, f"forecast_records[{record_index}]")
-    if _skip_if_held(store, forecast_role_tag, stored.agent_id, "rerun"):
+    if skip_if_held(store, forecast_role_tag, stored.agent_id, "rerun"):
         return False
 
     async def compute() -> tuple[_Plan, LogWrite]:

@@ -462,7 +462,7 @@ M5에서 정하는 판단 범위:
   | 데이터 | 한 행 | 비고 |
   |---|---|---|
   | 수주 | `{ demand_id, company_id, item_id, quantity, order_date, due_date, delivered_quantity }` | 고객사에게서 받은 주문 전체. `due_date`는 고객사 도착 기준. forecast의 주문 이력은 이 수주의 주문 수량을 그대로 쓴다(일부만 납품된 수주도 마찬가지 — 납품한 양은 공급에 따라 줄 수 있어 수요로 쓰지 않는다). 수주잔고와 미납분은 이 데이터에서 계산한다 |
-  | 사람이 정한 수량 | `{ demand_id, source: "manual", input_reason: "new_customer" \| "new_product" \| "promotion", company_id \| null, item_id, quantity, entered_at }` | 주문은 없는데 사람이 수량을 정한 것(신제품 첫 물량, 프로모션 이력이 없는 고객사·item의 프로모션 수량, 계약은 맺었지만 아직 주문하지 않은 새 고객사의 예상 물량). 고객사가 주문을 넣으면 그 뒤는 수주다. 넣을 때 입력 제한을 거친다 |
+  | 사람이 정한 수량 | `{ demand_id, source: "manual", input_reason: "new_customer" \| "new_product" \| "promotion", company_id \| null, item_id, quantity, entered_at }` | 주문은 없는데 사람이 수량을 정한 것(신제품 첫 물량, 프로모션 이력이 없는 고객사·item의 프로모션 수량, 계약은 맺었지만 아직 주문하지 않은 새 고객사의 예상 물량). 고객사가 주문을 넣으면 그 뒤는 수주다. 넣을 때 입력 제한을 거친다(item에 주 라인이 있고, 0 이상의 숫자이며, 계약 단위의 배수이고, 같은 (고객사, item)에 같은 수량이 없어야 한다). 넣은 사람이 그 라인에 외부 데이터 변경 알림을 보낸다 |
   | 계약 조건 | 최소 구매 약정 `{ company_id, item_id, binding, total_quantity, period_start, period_end }`, 공급 보장 물량 `{ company_id, item_id, quantity }`(계획 주기당), 계약 단위(상품별 기본값 + 고객사별 덮어쓰기) | 계약 단위는 상자·팔레트처럼 주문과 배분이 따르는 단위다. 고객사별 덮어쓰기는 그 고객사의 모든 item에 적용되고 상품별 기본값보다 우선한다 |
   | 재고·생산 중 물량 | 재고 `{ item_id, quantity }`, 생산 중 물량 `{ item_id, quantity, demand_ref }` | 물리적 실행(외부 경계)의 결과. 생산 중 물량 = 계획된 생산량 − 완료된 양. M4는 고정 파일 스텁 |
   | 라인 기준 정보 `line_assignments` | `{ item_id, line_id, preference: "primary" \| "alternate", valid_from }` | 어느 item을 어느 라인에서 만들 수 있는가(N:M). 시스템을 처음 설정할 때 등록하고 제품이 추가될 때 갱신한다 |
