@@ -15,8 +15,8 @@
   `validation_error`의 `rerun`은 판정 칸을 비워 기록이 다시 "검증 대기"가 되게 한다. 다른 reason의 `rerun`은 처리 상태만 바뀌고 기록의
   상태가 다시 계산돼 담당 agent에게 신호가 간다(예: `no_next_agent` 처리 뒤 forecast가 다음 agent를 다시 고른다).
 
-넣는 값은 넣을 때 입력 제한으로 확인한다: 숫자이고 0 이상, 계약 단위의 배수(거부), 같은 입력의 중복(거부), 과거 월별 요청량 범위를 크게 벗어나면
-경고(적용하고 `resolution.note`와 로그에 남긴다). agent 경계를 넘는 제약(공급 가능량 등)은 값이 배분으로 들어간 뒤 배분 결론의 검증에서 확인된다.
+넣는 값은 넣을 때 입력 제한으로 확인한다: 숫자이고 0 이상, 계약 단위의 배수(거부), 같은 입력의 중복(거부), 라인의 수량이면 그 escalation이 난
+조율의 수요에 없는 `demand_ref`(거부), 과거 월별 요청량 범위를 크게 벗어나면 경고(적용하고 `resolution.note`와 로그에 남긴다). agent 경계를 넘는 제약(공급 가능량 등)은 값이 배분으로 들어간 뒤 배분 결론의 검증에서 확인된다.
 
 담당별 읽기 범위는 행 단위라 `role_permissions`가 아니라 `read_escalation_records`가 `target_role`로 거른다.
 """
@@ -45,7 +45,7 @@ HistoryOf = Callable[[str, str], list[float]]  # (company_id, item_id) -> 과거
 
 class ResolutionRejected(ValueError):
     """사람의 처리를 거부함. `code`는 거부 이유(`wrong_role`, `not_open`, `duplicate`, `unsupported`, `wrong_kind`, `not_a_number`, `negative`,
-    `not_unit_multiple`, `empty`)다."""
+    `not_unit_multiple`, `empty`, `unknown_demand`)다."""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(f"{code}: {message}")
@@ -146,6 +146,7 @@ def resolve_escalation(
             fields += value_writes
         elif escalation.reason in QUANTITY_MAP_REASONS:
             _check_quantity_map(value, floor_unit_of)
+            _check_known_demands(store, resolver_role_tag, escalation, value)
         else:
             raise ResolutionRejected("unsupported", f"{escalation.reason}는 사람이 값을 넣어 처리하는 reason이 아님")
     else:
@@ -199,6 +200,18 @@ def _check_quantity_map(value: Any, floor_unit_of: Callable[[str], float] | None
         raise ValueError("수량을 확인하려면 floor_unit_of가 필요함")
     for demand_ref, quantity in value.items():
         _check_quantity(quantity, floor_unit_of(demand_ref), f"수량 {demand_ref}")
+
+
+def _check_known_demands(store: StateStore, role_tag: str, escalation: EscalationRecord, value: Mapping[str, Any]) -> None:
+    """값의 `demand_ref`가 모두 그 escalation이 난 조율의 수요(조율 로그 `log_seq`의 `inputs`)에 있는지 확인한다. 없으면 거부한다."""
+    entry = next((e for e in store.negotiation_log(role_tag) if e.seq == escalation.log_seq), None)
+    if entry is None or "inputs" not in entry.payload:
+        raise ValueError(f"{escalation.reason}의 log_seq({escalation.log_seq})가 가리키는 조율 로그 항목이 없어 수요를 확인할 수 없음")
+    inputs = entry.payload["inputs"]
+    known = {f["agent_id"] for f in inputs["forecasts"]} | {o["demand_id"] for o in inputs["orders"]} | {m["demand_id"] for m in inputs["manual"]}
+    unknown = sorted(set(value) - known)
+    if unknown:
+        raise ResolutionRejected("unknown_demand", f"이 조율에 없는 수요: {', '.join(unknown)}")
 
 
 def _forecast_value_writes(

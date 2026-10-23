@@ -369,7 +369,9 @@ def process_forwarded_forecasts(store: StateStore, supply_role_tag: str) -> list
     queue = store.queue(supply_role_tag)
     received: list[ForecastRecord] = []
     while not queue.empty():
-        record = receive_forwarded_forecast(store, supply_role_tag, queue.get_nowait())
+        message = queue.get_nowait()
+        record = receive_forwarded_forecast(store, supply_role_tag, message)
+        queue.ack(message)
         if record is not None:
             received.append(record)
     return received

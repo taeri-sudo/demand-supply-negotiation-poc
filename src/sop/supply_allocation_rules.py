@@ -14,6 +14,10 @@ State를 읽거나 쓰지 않는 순수 계산이다. 입력(`LineInputs`)은 �
    `commitments_exceed_capacity`로 끝내고 배분하지 않는다(`commitments_exceed_capacity`가 `notice`로 설정돼 있으면 알리고 진행하며,
    미납분을 먼저 채운 뒤 남은 공급을 하한끼리 비율로 나눈다).
 
+이어지는 조율은 `allocate_line`의 `frozen`으로 같은 규칙을 쓴다: 이전 결론에서 변경이 닿지 않는 item의 약한 묶임 항목은 이전 수량으로
+고정하고(강한 묶임은 입력에서 그대로 다시 정해진다), 그 둘을 뺀 남은 공급을 변경이 닿는 item의 약한 묶임 수요가 위 순서로 나눈다. 고정한
+합계가 공급을 넘으면 고정하지 않고 약한 묶임 전체를 다시 나눈다.
+
 계약 하한은 (고객사, item)별로 (구속력 있는 최소 구매 약정의 이번 주기 몫)과 (공급 보장 물량) 중 큰 쪽이고, 그 (고객사, item)의 이번 주기
 수요(강한 묶임 제외)를 넘지 않는다. 구속력 없는 약정은 하한이 아니다. 하한은 미납분과 따로 더해진다(미납분은 지난 주문을 마저 채우는 것이고
 하한은 이번 주기 몫이다). 약정의 이번 주기 몫 = (약정 총량 - 이미 가져간 양) / 계약 기간의 남은 개월 수(이번 주기 달 포함).
@@ -105,6 +109,9 @@ class LineInputs(BaseModel):
 
     `units`는 (고객사, item)별 계약 단위(`unit_key`), `margins`는 item별 1개당 마진이다. `pegs`는 강한 묶임으로 지정한 수요의
     `demand_ref`(M4는 테스트에서 지정한다). 생산 중 물량이 묶인 수주는 지정하지 않아도 그 물량만큼 강한 묶임이다.
+
+    `floor_overrides`·`peg_limits`는 사람이 escalation을 처리해 넣은 값이다(키는 `demand_ref`). `floor_overrides`는 그 수요가 속한
+    (고객사, item)의 계약 하한을 값으로 대체하고, `peg_limits`는 그 수요의 강한 묶임 수량을 값 이하로 줄인다(남는 부분은 약한 묶임이다).
     """
 
     line_id: str
@@ -122,6 +129,8 @@ class LineInputs(BaseModel):
     inventory: float = 0.0  # 이 라인 item들의 재고 합계
     remaining_capacity: float = 0.0
     pegs: dict[str, Peg] = Field(default_factory=dict)
+    floor_overrides: dict[str, float] = Field(default_factory=dict)
+    peg_limits: dict[str, float] = Field(default_factory=dict)
 
     def supply(self) -> float:
         """공급 가능량 = 재고 + 생산 중 물량 + 이번 주기 잔여 capacity."""
@@ -195,12 +204,26 @@ def build_demands(inputs: LineInputs) -> list[_Demand]:
         in_production = floor_to_unit(min(wip_by_ref.get(order.demand_id, 0.0), backlog), unit)
         if hard_all:
             in_production = backlog
+        limit = inputs.peg_limits.get(order.demand_id)
+        if limit is not None:
+            in_production = min(in_production, floor_to_unit(limit, unit))
         if in_production > 0:
             demands.append(_Demand(order.demand_id, "order", order.company_id, order.item_id, in_production, order.due_date, "hard", overdue, unit))
         if backlog - in_production > 0:
             demands.append(
                 _Demand(order.demand_id, "order", order.company_id, order.item_id, backlog - in_production, order.due_date, "soft", overdue, unit)
             )
+
+    def add_unscheduled(ref: str, kind: DemandKind, company_id: str | None, item_id: str, quantity: float, unit: float) -> None:
+        """납기가 없는 수요(예측 수요, 사람이 정한 수량). 강한 묶임으로 지정했으면 `peg_limits`까지만 강한 묶임이고 나머지는 약한 묶임이다."""
+        hard_quantity = quantity if inputs.pegs.get(ref) == "hard" else 0.0
+        limit = inputs.peg_limits.get(ref)
+        if limit is not None:
+            hard_quantity = min(hard_quantity, floor_to_unit(limit, unit))
+        if hard_quantity > 0:
+            demands.append(_Demand(ref, kind, company_id, item_id, hard_quantity, None, "hard", False, unit))
+        if quantity - hard_quantity > 0:
+            demands.append(_Demand(ref, kind, company_id, item_id, quantity - hard_quantity, None, "soft", False, unit))
 
     cycle_backlog: dict[tuple[str, str], float] = {}
     for order in sorted(inputs.orders, key=lambda o: (o.due_date, o.demand_id)):
@@ -217,15 +240,13 @@ def build_demands(inputs: LineInputs) -> list[_Demand]:
         unit = inputs.unit(forecast.company_id, forecast.item_id)
         remainder = floor_to_unit(max(0.0, forecast.quantity - cycle_backlog.get((forecast.company_id, forecast.item_id), 0.0)), unit)
         if remainder > 0:
-            peg: Peg = "hard" if inputs.pegs.get(forecast.agent_id) == "hard" else "soft"
-            demands.append(_Demand(forecast.agent_id, "forecast", forecast.company_id, forecast.item_id, remainder, None, peg, False, unit))
+            add_unscheduled(forecast.agent_id, "forecast", forecast.company_id, forecast.item_id, remainder, unit)
 
     for manual in sorted(inputs.manual, key=lambda m: m.demand_id):
         unit = inputs.unit(manual.company_id, manual.item_id)
         quantity = floor_to_unit(manual.quantity, unit)
         if quantity > 0:
-            peg = "hard" if inputs.pegs.get(manual.demand_id) == "hard" else "soft"
-            demands.append(_Demand(manual.demand_id, "manual", manual.company_id, manual.item_id, quantity, None, peg, False, unit))
+            add_unscheduled(manual.demand_id, "manual", manual.company_id, manual.item_id, quantity, unit)
     return demands
 
 
@@ -246,6 +267,14 @@ def _used(demands: list[_Demand]) -> float:
     return sum(d.allocated for d in demands)
 
 
+def demand_owners(inputs: LineInputs) -> dict[str, tuple[str, str]]:
+    """`demand_ref` → (고객사, item). 고객사가 정해지지 않은 사람이 정한 수량은 계약 하한의 대상이 아니라 뺀다."""
+    owners = {f.agent_id: (f.company_id, f.item_id) for f in inputs.forecasts}
+    owners |= {o.demand_id: (o.company_id, o.item_id) for o in inputs.orders}
+    owners |= {m.demand_id: (m.company_id, m.item_id) for m in inputs.manual if m.company_id is not None}
+    return owners
+
+
 def contract_floors(inputs: LineInputs, soft_cycle: list[_Demand]) -> dict[tuple[str, str], float]:
     """(고객사, item)별 계약 하한 = max(구속력 있는 약정의 이번 주기 몫, 공급 보장 물량)을 계약 단위로 내리고 그 이번 주기 수요를 넘지 않게 한다."""
     cycle_start = inputs.cycle_start()
@@ -257,13 +286,33 @@ def contract_floors(inputs: LineInputs, soft_cycle: list[_Demand]) -> dict[tuple
     for guarantee in inputs.guarantees:
         key = (guarantee.company_id, guarantee.item_id)
         wanted[key] = max(wanted.get(key, 0.0), guarantee.quantity)
+    owner = demand_owners(inputs)
+    for ref, quantity in inputs.floor_overrides.items():  # 사람이 정한 하한이 계산된 하한을 대체한다
+        if ref in owner:
+            wanted[owner[ref]] = quantity
     floors: dict[tuple[str, str], float] = {}
     for key, quantity in sorted(wanted.items()):
         demand = sum(d.requested for d in soft_cycle if (d.company_id, d.item_id) == key)
+        if demand <= 0:  # 이번 주기 수요가 없으면 하한이 적용되지 않는다(계약 단위도 필요 없다)
+            continue
         amount = min(floor_to_unit(quantity, inputs.unit(*key)), demand)
         if amount > 0:
             floors[key] = amount
     return floors
+
+
+def effective_floors(inputs: LineInputs) -> dict[tuple[str, str], float]:
+    """(고객사, item)별로 실제 적용되는 계약 하한: 이번 주기 수요(강한 묶임·미납분 제외)로 제한한 값."""
+    return contract_floors(inputs, [d for d in build_demands(inputs) if d.peg == "soft" and not d.overdue])
+
+
+def overdue_backlog(inputs: LineInputs) -> dict[tuple[str | None, str], float]:
+    """(고객사, item)별 미납분(납기가 기준일 이전인 수주잔고)."""
+    backlog: dict[tuple[str | None, str], float] = {}
+    for d in build_demands(inputs):
+        if d.overdue:
+            backlog[d.company_id, d.item_id] = backlog.get((d.company_id, d.item_id), 0.0) + d.requested
+    return backlog
 
 
 def commitment_gaps(inputs: LineInputs, entries: list[AllocationEntry], threshold: NoticeThreshold) -> list[dict]:
@@ -301,8 +350,15 @@ def _entry(d: _Demand) -> AllocationEntry:
     )
 
 
-def allocate_line(inputs: LineInputs, exceed_mode: ExceedMode = "intervention") -> StructuredJudgment:
-    """한 라인의 배분. `judgment["outcome"]`가 `allocated`면 `entries`(배분된 항목)가 있고, 아니면 배분하지 않고 escalation 사유만 있다."""
+def allocate_line(
+    inputs: LineInputs, exceed_mode: ExceedMode = "intervention", frozen: dict[tuple[str, str], float] | None = None
+) -> StructuredJudgment:
+    """한 라인의 배분. `judgment["outcome"]`가 `allocated`면 `entries`(배분된 항목)가 있고, 아니면 배분하지 않고 escalation 사유만 있다.
+
+    `frozen`은 이어지는 조율에서 이전 결론의 수량으로 고정할 약한 묶임 항목이다((`demand_ref`, `peg`) → 수량). 고정한 항목은 미납분·계약 하한·
+    마진·비율 단계에 들어가지 않고 그 수량(요청량 이하)으로 공급을 먼저 차지한다. 강한 묶임과 고정한 합계가 공급 가능량을 넘으면
+    고정하지 않고 약한 묶임 전체를 다시 나눈다.
+    """
     supply = inputs.supply()
     demands = build_demands(inputs)
     hard = [d for d in demands if d.peg == "hard"]
@@ -316,7 +372,14 @@ def allocate_line(inputs: LineInputs, exceed_mode: ExceedMode = "intervention") 
             judgment={**base, "outcome": "pegged_exceed_capacity", "entries": []},
             reasoning=f"강한 묶임 물량 합계 {hard_total:g}이 공급 가능량 {supply:g}을 넘음",
         )
-    available = supply - hard_total
+    fixed = [d for d in soft if frozen is not None and (d.ref, d.peg) in frozen]
+    for d in fixed:
+        d.allocated = min(d.requested, frozen[d.ref, d.peg]) if frozen is not None else 0.0
+    fixed_total = _used(fixed)
+    if fixed and hard_total + fixed_total > supply + _EPS:
+        return allocate_line(inputs, exceed_mode)  # 고정한 합계가 공급을 넘어 약한 묶임 전체를 다시 나눈다
+    soft = [d for d in soft if all(d is not f for f in fixed)]
+    available = supply - hard_total - fixed_total
 
     overdue = sorted([d for d in soft if d.overdue], key=lambda d: d.order_key())
     cycle = [d for d in soft if not d.overdue]
@@ -374,6 +437,7 @@ def allocate_line(inputs: LineInputs, exceed_mode: ExceedMode = "intervention") 
         judgment={
             **base, **stage_detail, "outcome": "allocated", "exceeded_notice": exceeded,
             "entries": [e.model_dump(mode="json") for e in entries],
+            "frozen": [{"ref": d.ref, "peg": d.peg, "quantity": d.allocated} for d in fixed],
             "unallocated": supply - total_allocated, "floors": {f"{c}|{i}": q for (c, i), q in floors.items()},
             "demands": [
                 {"ref": d.ref, "kind": d.kind, "company_id": d.company_id, "item_id": d.item_id, "requested": d.requested,

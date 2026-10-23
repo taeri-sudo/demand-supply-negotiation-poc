@@ -24,7 +24,7 @@ from sop.forecast_supply_allocation import (
     send_back_misrouted,
 )
 from sop.forecast_validation import VALIDATOR_ROLE_TAG
-from sop.state import Assumption, ForecastRecord, Scenario, SendBack, SuspectedCause
+from sop.state import Assumption, ForecastRecord, LogEntry, Scenario, SendBack, SuspectedCause
 from sop.validation_agent import ValidationRules, process_pending_validations
 from validation_fixtures import FORECAST, HUMAN, SUPPLY, SYSTEM, forecast_rules, make_store, open_hold
 
@@ -106,7 +106,8 @@ async def test_a_human_value_for_a_record_without_demand_becomes_the_scenario_an
     assert applied.payload["previous_scenario"] is None  # 덮어쓰기 전 scenario가 없었다
     assert record.validation is None and record.forward_to is None and record.send_back is None  # 판정 칸은 비워 둔다
     assert store.record_state(FORECAST, "forecast_records[0]") == "judged"
-    assert signals(store) == {FORECAST: 1}  # 검증agent에게는 신호가 가지 않는다
+    # 검증agent에게는 신호가 가지 않는다. 작성agent(forecast)는 판정됨 상태와 escalation 기록 처리 신호를 받고, 보류가 끝났음을 다음 agent도 안다
+    assert signals(store) == {FORECAST: 2, SUPPLY: 1}
 
 
 async def test_a_human_value_replaces_the_whole_scenario_and_the_previous_one_stays_in_the_log():
@@ -278,9 +279,12 @@ async def test_a_notice_cannot_be_resolved():
 
 
 def floor_store(reason="commitments_exceed_capacity"):
+    """라인 L1이 보류된 store. 보류가 난 조율의 로그에는 그 조율의 수요(예측 F-A·F-B, 수주 ORD-1)가 있다."""
     store = make_pair_store()
-    held = new_escalation(SUPPLY, reason, "공급 가능량을 넘음", line_id="L1")
-    store._state = store.state.model_copy(update={"escalation_records": [held]})  # pyright: ignore[reportPrivateUsage]
+    demands = {"forecasts": [{"agent_id": "F-A"}, {"agent_id": "F-B"}], "orders": [{"demand_id": "ORD-1"}], "manual": []}
+    entry = LogEntry(seq=1, ts=NOW.isoformat(), role_tag=SUPPLY, event="allocation_escalated", payload={"inputs": demands})
+    held = new_escalation(SUPPLY, reason, "공급 가능량을 넘음", line_id="L1", log_seq=1)
+    store._state = store.state.model_copy(update={"escalation_records": [held], "role_logs": {SUPPLY: [entry]}})  # pyright: ignore[reportPrivateUsage]
     return store
 
 
@@ -312,6 +316,17 @@ def test_line_quantities_that_break_a_limit_are_rejected(value, reason):
     assert store.state is before
 
 
+@pytest.mark.parametrize("reason", ["commitments_exceed_capacity", "pegged_exceed_capacity"])
+def test_a_demand_that_is_not_in_the_coordination_that_raised_the_escalation_is_rejected(reason):
+    store = floor_store(reason)
+    before = store.state
+
+    with pytest.raises(ResolutionRejected) as error:
+        floors(store, {"F-A": 300.0, "F-GONE": 6.0})
+
+    assert error.value.code == "unknown_demand" and "F-GONE" in str(error.value) and store.state is before
+
+
 # --- 시스템 담당(system_operator)의 처리 ---------------------------------------------------------------------------------
 
 
@@ -341,7 +356,7 @@ async def test_rerun_after_no_next_agent_lets_the_forecast_choose_the_next_agent
 
     resolve_escalation(store, SYSTEM, 0, kind="rerun")
 
-    assert store.record_state(FORECAST, "forecast_records[0]") == "judged" and signals(store) == {FORECAST: 1}
+    assert store.record_state(FORECAST, "forecast_records[0]") == "judged" and signals(store) == {FORECAST: 2, SUPPLY: 1}  # 상태 신호 + 처리 신호, 보류가 끝남
     assert forward_validated_forecast(store, FORECAST, "COMPANY-A", "RAMEN") is True
 
 
@@ -359,7 +374,8 @@ async def test_rerun_after_a_validation_error_clears_the_verdict_so_the_record_i
     resolve_escalation(store, SYSTEM, 0, kind="rerun")
 
     assert store.state.forecast_records[0].validation is None
-    assert store.record_state(FORECAST, "forecast_records[0]") == "awaiting_validation" and signals(store) == {VALIDATOR_ROLE_TAG: 1}
+    # 검증 오류는 검증agent가 만든 기록이라 카드가 없어 처리 신호는 가지 않는다. 보류가 끝났음은 다음 agent가 안다
+    assert store.record_state(FORECAST, "forecast_records[0]") == "awaiting_validation" and signals(store) == {VALIDATOR_ROLE_TAG: 1, SUPPLY: 1}
     (verdict,) = process_pending_validations(store, VALIDATOR_ROLE_TAG, forecast_rules())
     assert verdict.status == "passed"
 
@@ -409,7 +425,7 @@ async def test_an_expired_selection_proceeds_with_the_rule_value_as_expiry_and_s
     escalation, record = store.state.escalation_records[0], store.state.forecast_records[0]
     assert (escalation.status, escalation.resolution) == ("expired", None)
     assert record.scenario == before.scenario and record.selection_basis == "expiry" and record.validation is None
-    assert store.record_state(FORECAST, "forecast_records[0]") == "judged" and signals(store) == {FORECAST: 1}
+    assert store.record_state(FORECAST, "forecast_records[0]") == "judged" and signals(store) == {FORECAST: 2, SUPPLY: 1}
     entry = next(e for e in store.negotiation_log(FORECAST) if e.event == "escalation_expired")
     assert entry.agent_id == RAMEN and entry.payload["action"] == "proceed_with_value" and entry.payload["escalation"]["status"] == "expired"
 
@@ -450,7 +466,8 @@ async def test_an_expired_record_without_computable_assumptions_proceeds_without
     record = store.state.forecast_records[0]
     assert store.state.escalation_records[0].status == "expired"
     assert record == before and record.scenario is None and record.selection_basis is None  # 값 없이 진행한다
-    assert store.record_state(FORECAST, "forecast_records[0]") == "none" and signals(store) == {}
+    # 값이 없는 채로 끝나 담당 채널이 없는 상태가 되지만 작성agent는 처리 신호를, 다음 agent는 보류가 끝났다는 신호를 받는다
+    assert store.record_state(FORECAST, "forecast_records[0]") == "none" and signals(store) == {FORECAST: 1, SUPPLY: 1}
 
 
 async def test_nothing_happens_before_the_deadline_after_it_was_handled_or_for_reasons_without_an_expiry():

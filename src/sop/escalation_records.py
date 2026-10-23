@@ -116,3 +116,20 @@ def has_open_escalation_of(
         and ((agent_id is not None and r.agent_id == agent_id) or (line_id is not None and r.line_id == line_id))
         for r in records
     )
+
+
+def is_dismissed(records: list[EscalationRecord], *, agent_id: str | None = None, line_id: str | None = None) -> bool:
+    """`system_operator`가 `dismiss`로 처리해 이번 주기에서 뺀 인스턴스인가(forecast 기록이면 `agent_id`, 라인이면 `line_id`)."""
+    return any(
+        r.status == "resolved" and r.resolution is not None and r.resolution.kind == "dismiss"
+        and ((agent_id is not None and r.agent_id == agent_id) or (line_id is not None and r.line_id == line_id))
+        for r in records
+    )
+
+
+def expired_without_demand(records: list[EscalationRecord], agent_id: str) -> bool:
+    """시한이 지나 예측 수요 없이 끝난 인스턴스인가(시한 초과 처리가 `proceed_without_demand`인 reason의 기록이 `expired`)."""
+    return any(
+        r.agent_id == agent_id and r.status == "expired" and ESCALATION_REASONS[r.reason].on_expiry == "proceed_without_demand"
+        for r in records
+    )

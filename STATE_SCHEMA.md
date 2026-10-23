@@ -278,8 +278,8 @@ role_logs: { "{role_tag}": [ { seq, ts, role_tag, agent_id | null, event, round 
   `reason`(`no_next_agent`/`multiple_next_agents`)과 후보와 제외한 agent를, `misrouted_send_back`은 되돌린 agent(`from_role`)와
   그 기록이 통과한 시각을 담는다. "통과한 시각"은 `passed` 판정으로 통과한 기록이면 판정 시각(`validation_ts`),
   검증 면제 통과한 기록이면 escalation 처리 시각(`resolution_ts` — 사람의 처리는 `resolution.ts`, 시한
-  초과는 그 처리를 한 시각)이고, 둘 중 하나만 채운다(GRAPH_FLOW.md "받는 쪽 반송"). `allocation_decided`는 `line_id`, 조율에
-  넣은 수요 목록, 공급 가능량, 단계별 배분 결과(미납분·계약 하한·마진·비율), 마지막 순서로 얹은 값, 덮어쓰기 전의
+  초과는 그 처리를 한 시각)이고, 둘 중 하나만 채운다(GRAPH_FLOW.md "받는 쪽 반송"). `allocation_decided`는 `line_id`, 조율의 종류(`kind`:
+  정기 `regular`/이어지는 `continuing`), 조율에 넣은 입력(`inputs`, 변경은 이 입력과의 차이로 계산한다), 공급 가능량, 단계별 배분 결과(미납분·계약 하한·마진·비율), 마지막 순서로 얹은 값, 덮어쓰기 전의
   `allocations` 항목을 담는다. `resolution_applied`는 escalation 기록과 넣은 값(forecast 기록이면 덮어쓰기 전 `scenario` 포함)을, `escalation_expired`는 escalation 기록과 시한
   초과 처리 결과, 처리한 시각(`expired_at`)을 담는다.
 - **`negotiation_log`는 저장하지 않는다.** `role_logs`의 항목을 `seq` 순으로 합쳐 읽는 함수의 결과이고, 역할 사이에서
@@ -426,6 +426,10 @@ escalation 기록(사람의 결정이 없으므로 `status`와 `resolution`이 �
 - **반영**: 처리 함수가 escalation 기록의 `status`(`resolved`)·`resolution`과 값을 받는 기록을 한 번의 `update_state`로 쓴다.
   forecast 기록이면 `scenario.value`에 요청량을, `selection_basis`에 `"human"`을 쓰고 `validation`은 비워 둔다(판정 칸에는
   검증agent의 판정만 쓴다). 기록이 "판정됨"이 되어(GRAPH_FLOW.md "신호 규칙") forecast가 다음 agent로 넘긴다.
+- **라인 reason의 값 반영**: `commitments_exceed_capacity`의 값(`{demand_ref: quantity}`)은 `demand_ref`가 속한 (고객사, item)의 계약 하한을
+  그 수량으로 대체한다(값에 없는 (고객사, item)의 하한은 계산된 대로). `pegged_exceed_capacity`의 값은 그 수요의 강한 묶임 수량을 값 이하로
+  줄인다(남는 부분은 약한 묶임이 되고, 값에 없는 강한 묶임은 그대로). 두 값 모두 기록에 직접 쓰지 않고 처리된 escalation 기록의 `resolution`에
+  남아 그 계획 주기의 이후 조율마다 입력에 들어간다(같은 `demand_ref`에 값이 여럿이면 나중에 처리한 값이 이긴다).
 - **값을 넣는 모양**: forecast의 reason에서 `scenario`는 `value`가 넣은 요청량이고 `assumption_ids`는 빈 목록, `derivation`은 null이다(기존
   `scenario`가 있든 없든 같다). 덮어쓰기 전 `scenario`는 로그 `resolution_applied`의 `payload`에 남는다. 처리할 때 `forward_to`와 `send_back`도
   비운다(사람이 넣은 값이 이전 값을 대신하므로).

@@ -30,7 +30,7 @@ CYCLE_END = date(2017, 8, 31)
 
 def inputs(
     *, line_id: str = "L1", forecasts=(), orders=(), manual=(), commitments=(), guarantees=(), wip=(), inventory: float = 0.0,
-    capacity: float = 0.0, pegs=None, units=None, margins=None,
+    capacity: float = 0.0, pegs=None, units=None, margins=None, floor_overrides=None, peg_limits=None,
 ) -> LineInputs:
     """기본값: 모든 item의 계약 단위 6, 1개당 마진 1.0(`margins`로 item별로 바꾼다)."""
     items = {d.item_id for d in [*forecasts, *orders, *manual]}
@@ -40,7 +40,7 @@ def inputs(
         guarantees=list(guarantees), work_in_progress=list(wip),
         units={unit_key(None, item): 6.0 for item in items} | (units or {}),
         margins={item: 1.0 for item in items} | (margins or {}),
-        inventory=inventory, remaining_capacity=capacity, pegs=pegs or {},
+        inventory=inventory, remaining_capacity=capacity, pegs=pegs or {}, floor_overrides=floor_overrides or {}, peg_limits=peg_limits or {},
     )
 
 

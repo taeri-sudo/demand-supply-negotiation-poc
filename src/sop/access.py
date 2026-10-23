@@ -9,8 +9,9 @@ State에 직접 접근하지 않고 get_field/set_field/update_state만 거치�
 
 import asyncio
 import re
+import time
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -18,8 +19,18 @@ from .escalation_records import OPEN_STATUS, has_open_intervention
 from .logging_utils import log
 from .ids import now_iso
 from .agent_cards import card_of
-from .record_state import STATE_COLLECTIONS, RecordState, compute_record_state, owner_channel
+from .record_state import HOLD_STATES, STATE_COLLECTIONS, RecordState, compute_record_state, owner_channel
+from .signal_queue import ACK_TIMEOUT_SECONDS, SignalQueue
 from .state import EscalationRecord, LogEntry, LogEvent, State, merge_role_logs
+
+
+def signal(record_path: str, written_by: str) -> dict[str, str]:
+    """신호 하나. 기록의 위치만 담고 할 일은 담지 않는다. 받는 쪽이 그 기록(이나 그 기록이 속한 인스턴스)의 상태를 읽어 정한다.
+
+    예외는 하루 한 번의 조율 시각 신호 하나다(스케줄러가 `at`만 담아 보낸다 — 가리킬 기록이 없다).
+    """
+    return {"field_path": record_path, "written_by": written_by, "record_path": record_path}
+
 
 _SEGMENT_RE = re.compile(r"^(?P<name>[a-zA-Z_][a-zA-Z0-9_]*)(?:\[(?P<index>\d+)\])?$")
 # 권한의 field_path에서는 인스턴스 인덱스 자리에 와일드카드 `[*]`를 쓸 수 있다
@@ -157,20 +168,35 @@ def _is_append_only(current: Any, new: Any) -> bool:
     return isinstance(current, list) and isinstance(new, list) and len(new) >= len(current) and new[: len(current)] == current
 
 
+def instance_path(state: State, escalation: EscalationRecord) -> str | None:
+    """escalation 기록이 속한 인스턴스의 기록 위치: `agent_id`면 forecast 기록, `line_id`면 그 라인의 `allocations` 기록. 어느 쪽도 아니면 None."""
+    if escalation.agent_id is not None:
+        for index, record in enumerate(state.forecast_records):
+            if record.agent_id == escalation.agent_id:
+                return f"forecast_records[{index}]"
+    if escalation.line_id is not None:
+        for index, allocation in enumerate(state.allocations):
+            if allocation.line_id == escalation.line_id:
+                return f"allocations[{index}]"
+    return None
+
+
 class StateStore:
     """State 하나와, 그 State에 대한 유일한 접근 경로(get_field/set_field)를 갖는다."""
 
-    def __init__(self, initial_state: State) -> None:
+    def __init__(
+        self, initial_state: State, clock: Callable[[], float] = time.monotonic, ack_timeout: float = ACK_TIMEOUT_SECONDS
+    ) -> None:
         self._state = initial_state
-        self._queues: dict[str, asyncio.Queue] = defaultdict(asyncio.Queue)
+        self._queues: dict[str, SignalQueue] = defaultdict(lambda: SignalQueue(clock, ack_timeout))
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     @property
     def state(self) -> State:
         return self._state
 
-    def queue(self, channel: str) -> asyncio.Queue:
-        """agent의 채널(그 agent의 role_tag)의 큐."""
+    def queue(self, channel: str) -> SignalQueue:
+        """agent의 채널(그 agent의 role_tag)의 큐. 꺼낸 신호는 처리를 끝낸 뒤 `ack`한다."""
         return self._queues[channel]
 
     def lock(self, name: str) -> asyncio.Lock:
@@ -230,7 +256,9 @@ class StateStore:
         - 로그 항목은 역할 자신의 로그(`role_logs.{role_tag}`)에 `next_log_seq()`부터 차례로 붙는다.
         - 신호는 갱신이 끝난 뒤 자동으로 보낸다: 기록의 상태가 바뀐 곳에만, 바뀐 상태의 담당에게 보낸다(검증 대기는 검증agent,
           판정됨과 되돌려짐은 작성agent, 전달됨은 `forward_to`의 agent, 사람 대기는 human_manager. 채널은 담당 agent의 role_tag).
-          호출하는 쪽은 신호를 지정하지 않는다.
+          호출하는 쪽은 신호를 지정하지 않는다. 기록의 상태가 담당 채널이 없는 상태로 바뀌는 두 경우를 위해 신호를 둘 더 보낸다:
+          보류(업무 대기·시스템 대기)가 시작되거나 끝나면 그 기록의 작성agent 카드의 `known_agents`에게보내고, escalation 기록이
+          처리되거나 시한 초과로 끝나면 그 기록을 만든(카드가 있는) agent에게 보낸다. 두 신호도 그 기록이 속한 인스턴스의 기록을 가리킬 뿐이다.
         - `forward_to`가 바뀌면 작성agent 카드의 `known_agents`에 있는 role_tag만 허용한다. 아니면 `ForwardTargetRejected`를 내고 아무것도 쓰지 않는다.
         """
         log_path = f"role_logs.{role_tag}"
@@ -275,6 +303,28 @@ class StateStore:
                 if channel is not None:  # 완료와 상태 없음은 신호를 보내지 않는다
                     self._queues[channel].put_nowait({"field_path": path, "written_by": role_tag, "record_path": path})
                     sent.append(channel)
+                if old_state in HOLD_STATES or new_state in HOLD_STATES:
+                    # 보류가 시작되거나 끝나면 담당 채널이 없는 상태로 가더라도 다음 agent 후보가 알 수 있게 한다(예: 마지막 처리 중
+                    # 인스턴스가 보류로 빠져 다음 agent의 시작 조건이 충족됨). 이미 담당으로 신호를 받는 agent에게는 더 보내지 않는다
+                    card = card_of(updated.agent_cards, record.role_tag)
+                    for downstream in card.known_agents if card is not None else []:
+                        if downstream != channel:
+                            self._queues[downstream].put_nowait(
+                                signal(path, role_tag)
+                            )
+                            sent.append(downstream)
+        # escalation 기록이 처리되거나 시한 초과로 끝나면 그 기록을 만든 agent에게 그 기록이 속한 인스턴스(forecast 기록이나 라인의
+        # `allocations` 기록)를 가리켜 알린다. 기록의 상태가 담당 채널이 없는 상태로 돌아가도(예: 첫 실행이 실패한 인스턴스, 처리 뒤
+        # 이어지는 조율을 기다리는 라인) 하던 일을 이어 갈 수 있게 한다
+        for index, old in enumerate(before_state.escalation_records):
+            if old.status == OPEN_STATUS and index < len(updated.escalation_records) and updated.escalation_records[index].status != OPEN_STATUS:
+                creator = updated.escalation_records[index].trigger_edge.split("->")[0]
+                if card_of(updated.agent_cards, creator) is not None:  # 카드가 있는 agent만 받는다(검증agent는 기록의 상태로 받는다)
+                    closed = updated.escalation_records[index]
+                    owner = instance_path(updated, closed)
+                    if owner is not None:
+                        self._queues[creator].put_nowait(signal(owner, role_tag))
+                        sent.append(creator)
         # notice는 진행을 멈추지 않아 기록의 상태가 바뀌지 않으므로 새 notice 기록이 더해질 때 담당 채널로 직접 신호를 보낸다
         for index in range(len(before_state.escalation_records), len(updated.escalation_records)):
             record = updated.escalation_records[index]

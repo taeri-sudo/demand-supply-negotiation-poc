@@ -546,8 +546,8 @@ async def test_a_run_that_ends_held_sends_no_job_and_pushes_nothing(record_write
     await submit(store, "SNACK", [])  # 계산된 가정 없음
 
     assert record_writes == ["forecast_records[0]", "forecast_records[1]"]  # 실행마다 한 번
-    assert pushed(store) == {}  # 검증 대기 신호도, 다른 채널의 신호도 없다
-    assert store.queue("human_manager").qsize() == 2  # 사람을 깨우는 신호만 간다
+    assert pushed(store) == {"supply_coordination": 2}  # 검증 대기 신호는 없고, 보류가 시작됐다는 신호만 다음 agent에게 간다
+    assert store.queue("human_manager").qsize() == 2  # 사람을 깨우는 신호
 
 
 async def test_a_rerun_that_ends_held_writes_once_after_the_escalation_and_sends_no_job(record_writes):
@@ -562,5 +562,5 @@ async def test_a_rerun_that_ends_held_writes_once_after_the_escalation_and_sends
     assert await check_forecast_verdict(store, FORECAST, ForecastRerunHandling(inputs, result)) == "rerun"
 
     assert record_writes == ["forecast_records[0]"]  # 전용 쓰기 함수는 escalation 기록이 먼저 있어야만 쓰인다
-    assert pushed(store) == {}
+    assert pushed(store) == {"supply_coordination": 1}  # 검증 대기 신호는 없고, 보류가 시작됐다는 신호만 다음 agent에게 간다
     assert [e.reason for e in store.get_field(FORECAST, "escalation_records")] == ["options_exhausted"]

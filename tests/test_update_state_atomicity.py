@@ -243,7 +243,7 @@ async def test_an_error_verdict_applies_the_verdict_the_escalation_and_the_log_t
     verdict = store.get_field(FORECAST, "forecast_records[0]").validation
     (entry,) = [e for e in store.negotiation_log(FORECAST) if e.event == "validation_error"]
     assert verdict is not None and verdict.status == "error" and escalation.log_seq == entry.seq
-    assert queue_sizes(store) == {"system_operator": 1}  # 기록이 시스템 대기가 되어 판정됨 신호는 가지 않는다
+    assert queue_sizes(store) == {"system_operator": 1, "supply_coordination": 1}  # 기록이 시스템 대기가 되어 판정됨 신호는 가지 않는다(다음 agent는 보류가 시작됐음을 안다)
 
 
 async def test_a_rerun_write_with_its_rerun_log_entry_is_atomic(monkeypatch):

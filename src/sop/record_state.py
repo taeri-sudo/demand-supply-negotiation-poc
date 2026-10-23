@@ -32,6 +32,9 @@ RecordState = Literal[
 HUMAN_CHANNEL = "human_manager"
 SYSTEM_CHANNEL = "system_operator"
 
+# 보류: 처리되지 않은 escalation 기록이 있는 상태. 시작되거나 끝날 때 다음 agent 후보에게도 알린다(access.StateStore.update_state)
+HOLD_STATES: frozenset[RecordState] = frozenset(["awaiting_business", "awaiting_system"])
+
 # 상태를 가진 기록 컬렉션. 기록의 작성agent는 기록의 `role_tag`다. 새 컬렉션은 여기에 한 줄을 더한다
 STATE_COLLECTIONS: tuple[str, ...] = ("forecast_records", "allocations")
 

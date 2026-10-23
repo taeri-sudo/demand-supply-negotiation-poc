@@ -142,7 +142,9 @@ async def test_no_candidate_makes_a_no_next_agent_escalation(card_list):
     record = store.state.forecast_records[0]
     assert record.forward_to is None and record.scenario == before.scenario and record.validation == before.validation
     assert escalation.target_role == "system_operator" and escalation.trigger_edge == "forecast->system_operator"
-    assert state_of(store) == "awaiting_system" and pending(store) == {"system_operator": 1}
+    known = next(c for c in store.state.agent_cards if c.role_tag == FORECAST).known_agents
+    # 보류가 시작되면 담당(system_operator)에게 가고, 작성agent 카드의 known_agents에게도 알린다
+    assert state_of(store) == "awaiting_system" and pending(store) == {"system_operator": 1, **{agent: 1 for agent in known}}
     assert receive_forwarded_forecast(store, SUPPLY, {"field_path": "forecast_records[0]"}) is None
 
 
@@ -154,7 +156,7 @@ async def test_several_candidates_make_a_multiple_next_agents_escalation():
 
     (escalation,) = store.state.escalation_records
     assert escalation.reason == "multiple_next_agents" and urgency_of(escalation.reason) == "warning"
-    assert store.state.forecast_records[0].forward_to is None and pending(store) == {"system_operator": 1}
+    assert store.state.forecast_records[0].forward_to is None and pending(store) == {"system_operator": 1, SUPPLY: 1, OTHER: 1}
     entry = next(e for e in store.negotiation_log(FORECAST) if e.event == "next_agent_unresolved")
     assert entry.payload["candidates"] == [SUPPLY, OTHER] and escalation.log_seq == entry.seq
 
@@ -228,7 +230,7 @@ async def test_no_candidate_left_after_the_misroute_makes_a_no_next_agent_escala
     assert escalation.reason == "no_next_agent" and "supply_coordination" in escalation.rationale
     record = store.state.forecast_records[0]
     assert record.forward_to is None and record.send_back is None and state_of(store) == "awaiting_system"
-    assert pending(store) == {"system_operator": 1}
+    assert pending(store) == {"system_operator": 1, SUPPLY: 1}
     assert not [e for e in store.negotiation_log(FORECAST) if e.event == "rerun"]
 
 

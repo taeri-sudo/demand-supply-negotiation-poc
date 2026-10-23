@@ -185,7 +185,8 @@ def test_an_exempt_record_under_a_hold_waits_for_the_human_not_the_author():
 
     open_hold(store, RAMEN)
 
-    assert state_of(store) == "awaiting_business" and signals(store) == {"human_manager": 1}
+    # 보류가 시작되면 담당(human_manager)에게 가고, 작성agent 카드의 known_agents(supply_coordination)도 보류가 시작됐음을 안다
+    assert state_of(store) == "awaiting_business" and signals(store) == {"human_manager": 1, SUPPLY: 1}
 
 
 def test_the_validator_ignores_an_exempt_record():
@@ -264,15 +265,16 @@ async def test_the_normal_completion_judgment_and_rerun_each_signal_only_their_o
     assert signals(store) == {VALIDATOR_ROLE_TAG: 1}  # 재실행해 다시 쓴 기록: 다시 검증agent
 
 
-async def test_entering_a_hold_signals_only_the_human_and_never_the_validator():
+async def test_entering_a_hold_signals_the_human_and_the_next_agent_and_never_the_validator():
     store = ramen_store()
 
     await run_forecast_select_and_submit(store, FORECAST, "COMPANY-A", "RAMEN", [])  # 계산된 가정 없음 → 보류
 
-    assert signals(store) == {"human_manager": 1}
+    assert signals(store) == {"human_manager": 1, SUPPLY: 1}  # 검증agent에게는 가지 않는다
+    assert store.queue(SUPPLY).get_nowait()["record_path"] == "forecast_records[0]"
 
 
-async def test_a_selection_that_cannot_be_resolved_signals_only_the_human():
+async def test_a_selection_that_cannot_be_resolved_signals_the_human_and_the_next_agent():
     from sop.state import Assumption
     from assumption_fixtures import distinct
 
@@ -285,10 +287,10 @@ async def test_a_selection_that_cannot_be_resolved_signals_only_the_human():
 
     await run_forecast_select_and_submit(store, FORECAST, "COMPANY-A", "RAMEN", split)
 
-    assert signals(store) == {"human_manager": 1}
+    assert signals(store) == {"human_manager": 1, SUPPLY: 1}
 
 
-async def test_a_run_error_hold_without_a_record_write_signals_only_the_system_operator(monkeypatch):
+async def test_a_run_error_hold_without_a_record_write_signals_the_system_operator_and_the_next_agent(monkeypatch):
     from sop import forecast_steps
     from sop.forecast_supply_allocation import run_forecast_steps_select_and_submit
     from test_forecast_rerun import make
@@ -301,10 +303,10 @@ async def test_a_run_error_hold_without_a_record_write_signals_only_the_system_o
 
     await run_forecast_steps_select_and_submit(store, FORECAST, make())
 
-    assert signals(store) == {"system_operator": 1}  # 시스템 오류는 system_operator 담당이다
+    assert signals(store) == {"system_operator": 1, SUPPLY: 1}  # 시스템 오류는 system_operator 담당이고, 보류가 시작됐음을 다음 agent도 안다
 
 
-async def test_an_error_verdict_signals_only_the_system_operator():
+async def test_an_error_verdict_signals_the_system_operator_and_the_next_agent_but_not_the_author():
     from sop.validation_agent import ValidationRules
 
     store = await submitted_store()
@@ -314,7 +316,7 @@ async def test_an_error_verdict_signals_only_the_system_operator():
 
     process_pending_validations(store, VALIDATOR_ROLE_TAG, {FORECAST: ValidationRules(lambda r: r.agent_id, broken)})
 
-    assert signals(store) == {"system_operator": 1}  # 판정됨 신호는 가지 않는다(시스템 대기가 우선)
+    assert signals(store) == {"system_operator": 1, SUPPLY: 1}  # 판정됨 신호는 작성agent에게 가지 않는다(시스템 대기가 우선)
 
 
 async def test_forwarding_signals_only_the_agent_named_in_forward_to():

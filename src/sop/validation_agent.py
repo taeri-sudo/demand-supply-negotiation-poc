@@ -149,6 +149,7 @@ def process_pending_validations(
     while not queue.empty():
         message = queue.get_nowait()
         result = validate_job(store, validator_role_tag, message, rules_by_author)
+        queue.ack(message)  # 판정했거나 자기 일이 아니라서 넘어간 뒤에 확인한다. 예외로 끝나면 확인하지 않아 신호가 다시 나타난다
         if result is not None:
             results.append(result)
     return results
@@ -164,3 +165,4 @@ async def run_validation_worker(
     while True:
         message = await queue.get()
         validate_job(store, validator_role_tag, message, rules_by_author)
+        queue.ack(message)
