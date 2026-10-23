@@ -9,14 +9,13 @@ from assumption_fixtures import fixed_assumptions
 from sop.access import FieldWrite, StateStore
 from sop.forecast_steps import ForecastRerunHandling
 from sop.forecast_supply_allocation import (
-    allocate_validated_forecast,
     check_forecast_verdict,
     forward_validated_forecast,
+    receive_forwarded_forecast,
     run_forecast_select_and_submit,
     run_forecast_steps_select_and_submit,
 )
 from sop.forecast_validation import VALIDATOR_ROLE_TAG
-from sop.record_state import record_state
 from sop.state import ForecastRecord, Scenario, SendBack, SuspectedCause, ValidationResult
 from sop.validation_agent import process_pending_validations, validate_job
 from validation_fixtures import FORECAST, SUPPLY, forecast_rules, make_store, open_hold, write_verdict
@@ -56,7 +55,7 @@ def with_scenario(record: ForecastRecord) -> ForecastRecord:
 
 
 def state_of(store: StateStore, index: int = 0) -> str:
-    return record_state(store.state.forecast_records[index], store.state.escalation_records)
+    return store.record_state(FORECAST, f"forecast_records[{index}]")
 
 
 async def submitted_store() -> StateStore:
@@ -85,7 +84,7 @@ def test_the_state_is_computed_from_existing_values_by_priority():
     assert state_of(store) == "sent_back"  # 전달됨보다 되돌려짐이 우선한다
 
     open_hold(store, RAMEN)
-    assert state_of(store) == "awaiting_human"  # 사람 대기가 가장 우선한다
+    assert state_of(store) == "awaiting_business"  # 업무 대기가 가장 우선한다
 
 
 def test_forward_to_does_not_make_a_record_forwarded_unless_the_verdict_is_passed():
@@ -96,6 +95,109 @@ def test_forward_to_does_not_make_a_record_forwarded_unless_the_verdict_is_passe
     store.set_field(FORECAST, "forecast_records[0].forward_to", SUPPLY)
 
     assert state_of(store) == "judged"
+
+
+# --- 상태 계산: 7가지 상태와 검증 면제 통과 ---------------------------------------------------------------------------
+
+
+def test_a_system_operator_hold_makes_the_record_wait_for_the_system_and_ranks_below_business():
+    store = ramen_store()
+    store.set_field(FORECAST, "forecast_records[0]", with_scenario(store.state.forecast_records[0]))
+    open_hold(store, RAMEN, "forecast_run_error")
+    assert state_of(store) == "awaiting_system"
+
+    open_hold(store, RAMEN, "options_exhausted")  # 업무 담당 기록이 더해지면 업무 대기가 우선한다
+    assert state_of(store) == "awaiting_business"
+
+
+def test_a_notice_or_a_closed_escalation_does_not_hold_the_record():
+    from sop.escalation_records import new_escalation
+
+    store = ramen_store()
+    store.set_field(FORECAST, "forecast_records[0]", with_scenario(store.state.forecast_records[0]))
+    notice = new_escalation("supply_coordination", "commitment_gap", "알림", agent_id=RAMEN)
+    closed = new_escalation("forecast", "options_exhausted", "처리됨", agent_id=RAMEN).model_copy(update={"status": "resolved"})
+    store.set_field(FORECAST, "escalation_records", [notice, closed])
+
+    assert state_of(store) == "awaiting_validation"
+
+
+def test_a_passed_record_whose_author_card_has_no_produces_is_completed_and_signals_nobody():
+    store = ramen_store()
+    store.set_field(FORECAST, "forecast_records[0]", with_scenario(store.state.forecast_records[0]))
+    no_produces = [c.model_copy(update={"produces": None}) if c.role_tag == FORECAST else c for c in store.state.agent_cards]
+    store._state = store.state.model_copy(update={"agent_cards": no_produces})  # pyright: ignore[reportPrivateUsage]
+    drain(store)
+
+    write_verdict(store, VALIDATOR_ROLE_TAG, "forecast_records[0]", ValidationResult(status="passed"))
+
+    assert state_of(store) == "completed" and signals(store) == {}
+    assert store.record_owner(FORECAST, "forecast_records[0]") is None
+
+
+def test_a_failed_verdict_is_judged_even_when_the_author_has_no_produces():
+    store = ramen_store()
+    store.set_field(FORECAST, "forecast_records[0]", with_scenario(store.state.forecast_records[0]))
+    no_produces = [c.model_copy(update={"produces": None}) if c.role_tag == FORECAST else c for c in store.state.agent_cards]
+    store._state = store.state.model_copy(update={"agent_cards": no_produces})  # pyright: ignore[reportPrivateUsage]
+
+    write_verdict(store, VALIDATOR_ROLE_TAG, "forecast_records[0]", ValidationResult(status="error"))
+
+    assert state_of(store) == "judged"
+
+
+def test_a_record_of_an_author_without_a_validation_setting_is_not_awaiting_validation():
+    store = make_store([ForecastRecord(agent_id=RAMEN, company_id="COMPANY-A", item_id="RAMEN")], settings=[])
+
+    store.set_field(FORECAST, "forecast_records[0]", with_scenario(store.state.forecast_records[0]))
+
+    assert state_of(store) == "none" and signals(store) == {}
+
+
+# --- 검증 면제 통과: `selection_basis`가 human·expiry이면 판정 칸이 비어 있어도 통과다 -----------------------------------
+
+
+@pytest.mark.parametrize("basis", ["human", "expiry"])
+def test_an_exempt_record_with_an_empty_verdict_is_judged_then_forwarded_and_never_awaits_validation(basis):
+    store = ramen_store()
+
+    store.set_field(FORECAST, "forecast_records[0]", with_scenario(store.state.forecast_records[0]).model_copy(update={"selection_basis": basis}))
+
+    record = store.state.forecast_records[0]
+    assert record.validation is None and state_of(store) == "judged"
+    assert signals(store) == {FORECAST: 1}  # 검증agent에게는 신호가 가지 않고 작성agent에게 간다
+
+    store.set_field(FORECAST, "forecast_records[0].forward_to", SUPPLY)
+    assert state_of(store) == "forwarded"
+
+
+def test_the_other_selection_bases_still_await_validation():
+    for basis in ("rule", "agent_judgment"):
+        store = ramen_store()
+        store.set_field(FORECAST, "forecast_records[0]", with_scenario(store.state.forecast_records[0]).model_copy(update={"selection_basis": basis}))
+        assert state_of(store) == "awaiting_validation"
+
+
+def test_an_exempt_record_under_a_hold_waits_for_the_human_not_the_author():
+    store = ramen_store()
+    store.set_field(FORECAST, "forecast_records[0]", with_scenario(store.state.forecast_records[0]).model_copy(update={"selection_basis": "human"}))
+    drain(store)
+
+    open_hold(store, RAMEN)
+
+    assert state_of(store) == "awaiting_business" and signals(store) == {"human_manager": 1}
+
+
+def test_the_validator_ignores_an_exempt_record():
+    store = ramen_store()
+    store.set_field(FORECAST, "forecast_records[0]", with_scenario(store.state.forecast_records[0]).model_copy(update={"selection_basis": "expiry"}))
+    exempt = store.state
+
+    result = validate_job(
+        store, VALIDATOR_ROLE_TAG, {"field_path": "forecast_records[0]", "written_by": FORECAST}, forecast_rules()
+    )
+
+    assert result is None and store.state is exempt
 
 
 # --- 보내는 쪽: 상태가 바뀔 때만, 그 상태의 담당에게만 ------------------------------------------------------------
@@ -117,9 +219,9 @@ def test_a_write_that_leaves_the_state_unchanged_sends_nothing():
     drain(store)
 
     store.set_field(FORECAST, "forecast_records[0]", with_scenario(store.state.forecast_records[0]).model_copy(update={"selection_basis": "rule"}))
-    store.set_field(FORECAST, "forecast_records[0].selection_basis", "human")
+    store.set_field(FORECAST, "forecast_records[0].selection_basis", "agent_judgment")
 
-    assert signals(store) == {}  # 검증 대기에서 검증 대기
+    assert signals(store) == {}  # 검증 대기에서 검증 대기(`human`·`expiry`는 검증 면제 통과라 상태가 바뀐다 — 아래 "검증 면제 통과")
 
 
 def test_a_write_to_a_record_without_a_value_sends_nothing():
@@ -186,7 +288,7 @@ async def test_a_selection_that_cannot_be_resolved_signals_only_the_human():
     assert signals(store) == {"human_manager": 1}
 
 
-async def test_a_run_error_hold_without_a_record_write_signals_only_the_human(monkeypatch):
+async def test_a_run_error_hold_without_a_record_write_signals_only_the_system_operator(monkeypatch):
     from sop import forecast_steps
     from sop.forecast_supply_allocation import run_forecast_steps_select_and_submit
     from test_forecast_rerun import make
@@ -199,10 +301,10 @@ async def test_a_run_error_hold_without_a_record_write_signals_only_the_human(mo
 
     await run_forecast_steps_select_and_submit(store, FORECAST, make())
 
-    assert signals(store) == {"human_manager": 1}
+    assert signals(store) == {"system_operator": 1}  # 시스템 오류는 system_operator 담당이다
 
 
-async def test_an_error_verdict_signals_only_the_human():
+async def test_an_error_verdict_signals_only_the_system_operator():
     from sop.validation_agent import ValidationRules
 
     store = await submitted_store()
@@ -212,7 +314,7 @@ async def test_an_error_verdict_signals_only_the_human():
 
     process_pending_validations(store, VALIDATOR_ROLE_TAG, {FORECAST: ValidationRules(lambda r: r.agent_id, broken)})
 
-    assert signals(store) == {"human_manager": 1}  # 판정됨 신호는 가지 않는다(사람 대기가 우선)
+    assert signals(store) == {"system_operator": 1}  # 판정됨 신호는 가지 않는다(시스템 대기가 우선)
 
 
 async def test_forwarding_signals_only_the_agent_named_in_forward_to():
@@ -240,8 +342,7 @@ async def test_a_record_forwarded_to_another_agent_signals_only_that_agent():
 
     assert signals(store) == {"other_agent": 1}  # 채널은 담당 agent의 role_tag다
     message = store.queue("other_agent").get_nowait()
-    assert allocate_validated_forecast(store, SUPPLY, message) is None  # forward_to가 자기가 아니다
-    assert store.get_field(SUPPLY, "allocation_candidates") == []
+    assert receive_forwarded_forecast(store, SUPPLY, message) is None  # forward_to가 자기가 아니다
 
 
 async def test_a_record_that_is_already_forwarded_is_not_forwarded_again():
@@ -346,11 +447,10 @@ async def test_supply_coordination_ignores_a_record_that_is_not_judged_as_passed
     store = await submitted_store()
     message = {"field_path": "forecast_records[0]", "written_by": FORECAST}
 
-    assert allocate_validated_forecast(store, SUPPLY, message) is None  # 검증 대기
+    assert receive_forwarded_forecast(store, SUPPLY, message) is None  # 검증 대기
     write_verdict(store, VALIDATOR_ROLE_TAG, "forecast_records[0]", ValidationResult(status="passed"))
     open_hold(store, RAMEN)
-    assert allocate_validated_forecast(store, SUPPLY, message) is None  # 사람 대기(늦게 도착한 신호)
-    assert store.get_field(SUPPLY, "allocation_candidates") == []
+    assert receive_forwarded_forecast(store, SUPPLY, message) is None  # 사람 대기(늦게 도착한 신호)
 
 
 async def test_the_author_ignores_a_signal_for_a_forwarded_record():
@@ -387,5 +487,4 @@ async def test_supply_coordination_ignores_a_record_that_was_sent_back_after_for
     write_send_back(store)
 
     message = {"field_path": "forecast_records[0]", "written_by": FORECAST}
-    assert allocate_validated_forecast(store, SUPPLY, message) is None
-    assert store.get_field(SUPPLY, "allocation_candidates") == []
+    assert receive_forwarded_forecast(store, SUPPLY, message) is None

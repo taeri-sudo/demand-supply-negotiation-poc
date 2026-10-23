@@ -38,7 +38,7 @@ from sop.state import (
 )
 from test_data_source_judgment import END, empty_similar, orders_from_pos
 from test_forecast_assumption_steps import _market_and_pos
-from validation_fixtures import forecast_rules, make_store as make_pipeline_store, validate_and_allocate
+from validation_fixtures import forecast_rules, make_store as make_pipeline_store, validate_and_receive
 
 pytestmark = pytest.mark.anyio
 
@@ -556,9 +556,14 @@ def make_store() -> StateStore:
 
 
 def validate_and_send(store: StateStore, inputs: InstanceInputs):
-    """검증agent가 판정하고 supply_coordination이 받아 만든 allocation_candidate 목록."""
+    """검증agent가 판정하고 supply_coordination이 받은 기록 목록."""
     rules = forecast_rules(lambda company_id, item_id: monthly_order_history(inputs.orders, inputs.data_end))
-    return validate_and_allocate(store, rules)
+    return validate_and_receive(store, rules)
+
+
+def forwarded_count(store: StateStore) -> int:
+    """forecast가 supply_coordination에게 넘긴 횟수."""
+    return sum(1 for e in store.negotiation_log("forecast") if e.event == "forwarded")
 
 
 def record_of(store: StateStore) -> ForecastRecord:
@@ -571,11 +576,11 @@ async def test_first_run_reflects_the_steps_in_state_and_sends_the_request():
 
     result, submitted = await run_forecast_steps_select_and_submit(store, "forecast", inputs)
     assert result is not None
-    (candidate,) = validate_and_send(store, inputs)
+    (received,) = validate_and_send(store, inputs)
 
     record = record_of(store)
     assert submitted and ids(result) == [a.assumption_id for a in record.assumptions]
-    assert candidate.allocation == {AGENT_ID: record.scenario.value if record.scenario else None}
+    assert received.agent_id == AGENT_ID and received.scenario == record.scenario
     assert record.scenario is not None and record.selection_basis == "rule"
     assert [s.kind for s in record.data_sources].count("orders") == 1 and record.cleaning == result.collection.cleaning
     assert record.validation is not None and record.validation.status == "passed"
@@ -608,7 +613,7 @@ async def test_all_assumptions_excluded_after_a_scenario_existed_is_options_exha
     )
     assert "data_source:insufficient" in escalation.rationale
     assert store.queue("forecast_validation").empty()  # 새 요청량을 검증agent에 넘기지 않는다
-    assert len(store.get_field("supply_coordination", "allocation_candidates")) == 1
+    assert forwarded_count(store) == 1
     assert after.validation is None  # 재실행한 결과는 아직 검증받지 않았다
     (rerun_entry,) = [e for e in store.negotiation_log("forecast") if e.event == "rerun"]
     assert rerun_entry.agent_id == AGENT_ID and rerun_entry.payload["suspected_cause_reasons"] == ["data_source:insufficient"]
@@ -649,12 +654,12 @@ async def test_a_rerun_that_leaves_assumptions_replaces_the_scenario_and_sends_t
     (second,) = validate_and_send(store, inputs)
 
     record = record_of(store)
-    assert sent is True and second.plan_id != first.plan_id
+    assert sent is True and second.scenario == record.scenario and first.scenario != second.scenario
     assert record.scenario is not None and record.scenario.assumption_ids == [DEFAULT_ID]
     assert [e.assumption_id for e in record.excluded_assumptions] == [TREND_ID]
     assert [(d.driver, d.reasons) for d in record.excluded_drivers] == [("category_trend", ["assumption:value_out_of_range"])]
     assert store.get_field("forecast", "escalation_records") == []
-    assert len(store.get_field("supply_coordination", "allocation_candidates")) == 2
+    assert forwarded_count(store) == 2
 
 
 def test_every_step_and_the_rerun_judgments_use_the_common_judgment_schema():

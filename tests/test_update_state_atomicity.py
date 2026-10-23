@@ -15,7 +15,7 @@ from sop.forecast_steps import ForecastRerunHandling
 from sop.forecast_supply_allocation import (
     check_forecast_verdict,
     forward_validated_forecast,
-    process_pending_allocations,
+    process_forwarded_forecasts,
     run_forecast_select_and_submit,
     run_forecast_steps_select_and_submit,
 )
@@ -23,7 +23,7 @@ from sop.forecast_validation import VALIDATOR_ROLE_TAG
 from sop.state import ForecastRecord, RolePermission, State
 from sop.validation_agent import ValidationRules, process_pending_validations
 from test_forecast_rerun import AGENT_ID, DEFAULT_ID, first_run, make
-from validation_fixtures import FORECAST, SUPPLY, forecast_rules, make_store, validate_and_allocate
+from validation_fixtures import FORECAST, SUPPLY, forecast_rules, make_store, validate_and_receive
 
 pytestmark = pytest.mark.anyio
 
@@ -74,7 +74,7 @@ def commit_store() -> StateStore:
     permissions = [
         RolePermission(role_tag="f", field_path="forecast_records", access="w"),
         RolePermission(role_tag="f", field_path="escalation_records", access="w"),
-        RolePermission(role_tag="f", field_path="role_logs.f", access="w"),
+        RolePermission(role_tag="f", field_path="role_logs.f", access="a"),
     ]
     records = [ForecastRecord(agent_id="C:I", company_id="C", item_id="I")]
     return StateStore(State(forecast_records=records, role_permissions=permissions))
@@ -184,13 +184,17 @@ async def test_forwarding_a_passed_record_is_atomic(monkeypatch):
     await assert_nothing_is_applied(store, monkeypatch, lambda: forward_validated_forecast(store, FORECAST, "COMPANY-A", "RAMEN"))
 
 
-async def test_creating_an_allocation_candidate_is_atomic(monkeypatch):
+async def test_a_misrouted_send_back_is_atomic(monkeypatch):
     store = ramen_store()
     await run_forecast_select_and_submit(store, FORECAST, "COMPANY-A", "RAMEN", fixed_assumptions("RAMEN"))
     process_pending_validations(store, VALIDATOR_ROLE_TAG, forecast_rules())
     forward_validated_forecast(store, FORECAST, "COMPANY-A", "RAMEN")
+    mismatched = [  # 받는 쪽의 카드가 바뀌어 더는 이 기록을 받지 않는다
+        card.model_copy(update={"accepts": "다른 입력"}) if card.role_tag == SUPPLY else card for card in store.state.agent_cards
+    ]
+    store._state = store.state.model_copy(update={"agent_cards": mismatched})  # pyright: ignore[reportPrivateUsage]
 
-    await assert_nothing_is_applied(store, monkeypatch, lambda: process_pending_allocations(store, SUPPLY), inbox=(SUPPLY,))
+    await assert_nothing_is_applied(store, monkeypatch, lambda: process_forwarded_forecasts(store, SUPPLY), inbox=(SUPPLY,))
 
 
 async def test_a_passed_verdict_is_atomic(monkeypatch):
@@ -223,7 +227,7 @@ async def test_an_error_verdict_with_its_log_entry_and_escalation_is_atomic(monk
     await assert_nothing_is_applied(store, monkeypatch, lambda: process_pending_validations(store, VALIDATOR_ROLE_TAG, rules), inbox=(VALIDATOR_ROLE_TAG,))
 
 
-async def test_an_error_verdict_applies_the_verdict_the_escalation_and_the_log_together_and_only_the_human_is_signalled():
+async def test_an_error_verdict_applies_the_verdict_the_escalation_and_the_log_together_and_only_the_system_operator_is_signalled():
     store = ramen_store()
     await run_forecast_select_and_submit(store, FORECAST, "COMPANY-A", "RAMEN", fixed_assumptions("RAMEN"))
     store.queue(VALIDATOR_ROLE_TAG).get_nowait()
@@ -239,7 +243,7 @@ async def test_an_error_verdict_applies_the_verdict_the_escalation_and_the_log_t
     verdict = store.get_field(FORECAST, "forecast_records[0]").validation
     (entry,) = [e for e in store.negotiation_log(FORECAST) if e.event == "validation_error"]
     assert verdict is not None and verdict.status == "error" and escalation.log_seq == entry.seq
-    assert queue_sizes(store) == {"human_manager": 1}  # 기록이 사람 대기가 되어 판정됨 신호는 가지 않는다
+    assert queue_sizes(store) == {"system_operator": 1}  # 기록이 시스템 대기가 되어 판정됨 신호는 가지 않는다
 
 
 async def test_a_rerun_write_with_its_rerun_log_entry_is_atomic(monkeypatch):
@@ -273,4 +277,4 @@ async def test_the_normal_path_writes_the_record_and_its_log_entry_before_the_jo
     (entry,) = store.negotiation_log(FORECAST)
     assert record.scenario is not None and entry.event == "scenario_decided"
     assert store.queue(VALIDATOR_ROLE_TAG).qsize() == 1 and queue_sizes(store) == {VALIDATOR_ROLE_TAG: 1}
-    assert len(validate_and_allocate(store)) == 1
+    assert len(validate_and_receive(store)) == 1

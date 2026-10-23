@@ -1,4 +1,4 @@
-"""State의 8개 최상위 필드 정의. 구조는 STATE_SCHEMA.md를 따른다.
+"""State의 9개 최상위 필드 정의. 구조는 STATE_SCHEMA.md를 따른다.
 
 State 스키마 자체가 바뀌면(필드 추가/제거/형태 변경) 이 파일과
 STATE_SCHEMA.md를 함께 고친다 — 바뀐 이유는 JOURNAL.md에 남긴다.
@@ -10,13 +10,12 @@ from typing import Literal, get_args
 from pydantic import BaseModel, Field, model_validator
 
 ValidationStatus = Literal["passed", "failed", "error"]
-SelectionBasis = Literal["rule", "agent_judgment", "human"]
-CandidateStatus = Literal["generated", "selected", "rejected"]
+SelectionBasis = Literal["rule", "agent_judgment", "human", "expiry"]
 ResponseStatus = Literal["feasible", "infeasible", "in_progress"]
 EscalationKind = Literal["rule", "agent_judgment", "human"]
 EscalationMode = Literal["intervention", "notice"]
 ProtocolSource = Literal["initial_design", "promoted_from_trace", "external_benchmark"]
-AccessMode = Literal["r", "w"]
+AccessMode = Literal["r", "w", "a"]
 
 # 데이터 소스 — kind(출처)와 item_scope(예측 대상 item과의 관계)는 독립된 두 변수
 DataKind = Literal["orders", "pos", "market"]
@@ -26,10 +25,11 @@ DriverName = Literal["category_trend", "price", "event"]
 AssumptionDefinedBy = Literal["rule", "agent_judgment"]
 
 # 의심되는 원인 — type은 문제 대상, issue는 문제 내용
-CauseType = Literal["assumption", "data_source", "method_selection", "misrouted"]
+CauseType = Literal["assumption", "data_source", "method_selection", "misrouted", "allocation"]
 AssumptionIssue = Literal["no_evidence", "value_out_of_range", "not_distinct", "double_counted"]
 DataSourceIssue = Literal["insufficient", "contaminated", "irrelevant", "outdated"]
-CauseIssue = AssumptionIssue | DataSourceIssue
+AllocationIssue = Literal["exceeds_supply"]
+CauseIssue = AssumptionIssue | DataSourceIssue | AllocationIssue
 
 _ASSUMPTION_ISSUES = frozenset(get_args(AssumptionIssue))
 _DATA_SOURCE_ISSUES = frozenset(get_args(DataSourceIssue))
@@ -88,6 +88,14 @@ class SuspectedCause(BaseModel):
                 and (self.source.kind, self.source.item_scope) == ("orders", "same_item")
             ):
                 raise ValueError("orders의 irrelevant는 허용되지 않음(orders는 항상 쓰므로 소스를 제외할 수 없고 outdated만 받음)")
+        elif self.type == "allocation":
+            if self.issue != "exceeds_supply":
+                raise ValueError("type=allocation의 issue는 exceeds_supply여야 함")
+            if (
+                self.assumption_id is not None or self.drivers is not None
+                or self.source is not None or self.use_from is not None
+            ):
+                raise ValueError("type=allocation에는 assumption_id·drivers·source·use_from이 없음")
         else:
             if self.issue is not None:
                 raise ValueError(f"type={self.type}은 issue가 없어야 함")
@@ -134,6 +142,8 @@ class SendBack(BaseModel):
     def _misrouted_is_sent_alone(self) -> "SendBack":
         if any(c.type == "misrouted" for c in self.suspected_causes) and len(self.suspected_causes) > 1:
             raise ValueError("misrouted는 다른 이유와 함께 보내지 않는다")
+        if any(c.type == "allocation" for c in self.suspected_causes):
+            raise ValueError("allocation은 allocations의 판정(validation)에만 쓴다")
         return self
 
     @property
@@ -192,7 +202,7 @@ class Scenario(BaseModel):
 
     value: float
     assumption_ids: list[str]
-    derivation: ScenarioDerivation
+    derivation: ScenarioDerivation | None  # 사람이 넣은 값이면 None(가정에서 만든 값이 아니다)
 
 
 class DataSource(BaseModel):
@@ -252,7 +262,7 @@ def suspected_cause_reason(cause: SuspectedCause) -> str:
 
 
 _SUSPECTED_CAUSE_REASONS = frozenset(
-    [*(f"assumption:{i}" for i in _ASSUMPTION_ISSUES), *(f"data_source:{i}" for i in _DATA_SOURCE_ISSUES), "method_selection"]
+    [*(f"assumption:{i}" for i in _ASSUMPTION_ISSUES), *(f"data_source:{i}" for i in _DATA_SOURCE_ISSUES), "method_selection", "allocation:exceeds_supply"]
 )
 
 
@@ -285,7 +295,6 @@ class ForecastRecord(BaseModel):
     agent_id: str
     company_id: str
     item_id: str
-    pool_key: str | None = None
     role_tag: Literal["forecast"] = "forecast"
     assumptions: list[Assumption] = Field(default_factory=list)
     premises: list[Driver] = Field(default_factory=list)  # 모든 가정의 전제(확정된 프로모션 일정)
@@ -300,6 +309,12 @@ class ForecastRecord(BaseModel):
     forward_to: str | None = None  # passed를 확인한 작성agent가 정한 다음 agent의 role_tag
     send_back: SendBack | None = None  # 작성agent에게 되돌리는 쪽이 쓴다
 
+    @model_validator(mode="after")
+    def _no_allocation_cause(self) -> "ForecastRecord":
+        if self.validation is not None and any(c.type == "allocation" for c in self.validation.suspected_causes):
+            raise ValueError("allocation은 allocations의 판정에만 쓴다(forecast 기록의 판정에는 쓸 수 없음)")
+        return self
+
 
 # --- 2. capacity_pools --------------------------------------------------------
 
@@ -311,14 +326,50 @@ class CapacityAdjustment(BaseModel):
 
 
 class CapacityPool(BaseModel):
-    pool_id: str
+    """생산라인 하나의 생산능력(라인 하나 = 풀 하나). `line_id`는 라인 기준 정보(`line_assignments`)의 `line_id`와 같은 값이다."""
+
+    line_id: str
     total_capacity: float
     remaining_capacity: float
     adjustment_history: list[CapacityAdjustment] = Field(default_factory=list)
-    linked_pool_key: str | None = None
 
 
-# --- 3. allocation_candidates -------------------------------------------------
+# --- 3. allocations -----------------------------------------------------------
+
+DemandKind = Literal["forecast", "order", "manual"]
+Peg = Literal["hard", "soft"]
+
+
+class AllocationEntry(BaseModel):
+    """배분 결론의 항목 하나. `quantity`는 계약 단위의 배수다."""
+
+    demand_ref: str  # 예측 수요면 forecast agent_id, 수주·사람이 정한 수량이면 demand_id
+    demand_kind: DemandKind
+    company_id: str | None = None  # 사람이 정한 수량은 고객사가 정해지지 않았을 수 있다
+    item_id: str
+    quantity: float
+    due_date: date | None = None  # 수주만(고객사 도착 기준)
+    peg: Peg  # hard: 다른 수요로 옮길 수 없음, soft: 조율로 옮길 수 있음
+
+
+class Allocation(BaseModel):
+    """supply_coordination이 조율을 끝내고 쓰는 확정된 현재 배분(라인마다 하나). 조율이 끝날 때만 덮어쓴다.
+
+    시스템을 처음 설정할 때 라인마다 빈 기록(`entries` 비어 있음, `cycle`·`validation` None)을 만든다. 빈 기록은 값이 없어 상태가 없다.
+    """
+
+    role_tag: Literal["supply_coordination"] = "supply_coordination"
+    line_id: str
+    cycle: str | None = None  # 어느 계획 주기의 배분인지. 빈 기록(첫 조율 전)은 None
+    entries: list[AllocationEntry] = Field(default_factory=list)
+    log_seq: int | None = None  # 이 결론을 쓴 로그 항목(role_logs.supply_coordination)의 seq
+    validation: ValidationResult | None = None
+
+    @model_validator(mode="after")
+    def _only_allocation_causes(self) -> "Allocation":
+        if self.validation is not None and any(c.type != "allocation" for c in self.validation.suspected_causes):
+            raise ValueError("allocations의 판정에는 allocation 유형의 이유만 쓴다")
+        return self
 
 
 class Exchange(BaseModel):
@@ -334,16 +385,6 @@ class Exchange(BaseModel):
     validation: ValidationResult | None = None
 
 
-class AllocationCandidate(BaseModel):
-    plan_id: str
-    allocation: dict[str, float] = Field(default_factory=dict)
-    cost: float | None = None
-    risk: float | None = None
-    status: CandidateStatus = "generated"
-    required_stages: list[str] = Field(default_factory=list)
-    exchanges: list[Exchange] = Field(default_factory=list)
-
-
 # --- 4. role_logs ---------------------------------------------------------------
 
 # 사건 이름은 정해진 것만 쓴다. 값(agent_id, plan_id, 의심되는 원인, 판정 시각 등)은 이름에 넣지 않고 필드와 payload에 담는다
@@ -357,10 +398,14 @@ LogEvent = Literal[
     "misrouted_send_back",
     "forecast_run_error",
     "forecast_run_skipped",
-    "allocation_candidate_generated",
+    "allocation_decided",
+    "allocation_escalated",
+    "commitment_gap_noticed",
+    "escalation_expired",
     "validation_passed",
     "validation_failed",
     "validation_error",
+    "resolution_applied",
 ]
 
 
@@ -385,7 +430,7 @@ def merge_role_logs(role_logs: dict[str, list[LogEntry]]) -> list[LogEntry]:
 
 
 class NoticeThreshold(BaseModel):
-    """supply_coordination->human_manager 알림 기준 — 약정 잔여량과의 차이 비율(처리 규칙은 M4·M5에서 정함).
+    """supply_coordination->human_manager 알림 기준 — (약정의 이번 주기 몫과 배분의 차이) ÷ 약정의 이번 주기 몫.
 
     구속력이 없으면 우리가 손실을 떠안으므로 더 작은 차이에도 알린다.
     """
@@ -396,7 +441,7 @@ class NoticeThreshold(BaseModel):
 
 class InteractionProtocol(BaseModel):
     edge: str
-    max_rounds: int | None = None
+    max_exchanges: int | None = None
     repeat_escalation_threshold: int | None = None
     scope: list[str]
     escalation_trigger: str | None = None
@@ -419,20 +464,44 @@ class RolePermission(BaseModel):
 
 # --- 7. escalation_records -----------------------------------------------------
 
+EscalationTarget = Literal["human_manager", "system_operator"]
+EscalationStatus = Literal["open", "resolved", "expired"]
+ResolutionKind = Literal["value", "rerun", "dismiss"]
+
+
+class Resolution(BaseModel):
+    """사람의 처리. `value`는 forecast의 reason이면 요청량(숫자), `commitments_exceed_capacity`이면 고객사별 하한 수량(`{demand_ref: quantity}`)이다."""
+
+    resolved_by: str
+    ts: str
+    kind: ResolutionKind
+    value: float | dict[str, float] | None = None
+    note: str | None = None
+
 
 class EscalationRecord(BaseModel):
-    """사람(human_manager)에게 올라간 escalation 기록. intervention은 진행을 멈추고 결정을
-    기다리며, notice는 알리기만 하고 진행한다(resolution 없음)."""
+    """사람에게 올라간 escalation 기록. `intervention`은 진행을 멈추고 사람의 결정을 기다리고, `notice`는 알리기만 하고
+    진행한다(`resolution` 없음). 담당(`target_role`)·mode·긴급도·시한 초과 처리는 코드의 reason 대응표가 정한다(`escalation_records.py`)."""
 
-    agent_id: str | None = None  # escalation 기록이 발생한 인스턴스("{company_id}:{item_id}"). 인스턴스와 무관한 엣지는 None
+    agent_id: str | None = None  # escalation 기록이 발생한 인스턴스("{company_id}:{item_id}"). 인스턴스와 무관하면 None
+    line_id: str | None = None  # supply_coordination이 라인 단위로 올린 기록이면 그 라인
     trigger_edge: str
     reason: str
     rationale: str  # 사람이 읽는 이유 설명
-    target_role: Literal["human_manager"] = "human_manager"
+    target_role: EscalationTarget
     mode: EscalationMode = "intervention"
     log_seq: int | None = None  # 이 escalation과 관련된 로그 항목의 seq(role_logs)
-    status: str
-    resolution: str | None = None  # intervention일 때만
+    deadline: str | None = None  # 응답 시한. 시한 초과 처리가 있는 reason만
+    status: EscalationStatus | None = None  # intervention일 때만
+    resolution: Resolution | None = None  # intervention일 때만
+
+    @model_validator(mode="after")
+    def _check_status_and_resolution_follow_mode(self) -> "EscalationRecord":
+        if self.mode == "intervention" and self.status is None:
+            raise ValueError("intervention에는 status가 필요하다")
+        if self.mode == "notice" and (self.status is not None or self.resolution is not None):
+            raise ValueError("notice는 사람의 결정이 없으므로 status와 resolution이 없다")
+        return self
 
 
 # --- 8. agent_cards -------------------------------------------------------------
@@ -451,12 +520,24 @@ class AgentCard(BaseModel):
     known_agents: list[str] = Field(default_factory=list)  # 이 agent가 넘길 수 있는 agent의 role_tag
 
 
+ValidationPoint = Literal["per_record", "on_conclusion"]
+
+
+class ValidationSetting(BaseModel):
+    """어느 agent를 어느 검증agent가 언제 검증하는지(STATE_SCHEMA.md 9번 절). 검증 시점은 agent가 맡은 일이 끝났을 때다."""
+
+    role_tag: str  # 검증받는 agent
+    validator_role_tag: str  # 그 agent를 검증하는 검증agent
+    validation_point: ValidationPoint
+
+
 class State(BaseModel):
     forecast_records: list[ForecastRecord] = Field(default_factory=list)
     capacity_pools: list[CapacityPool] = Field(default_factory=list)
-    allocation_candidates: list[AllocationCandidate] = Field(default_factory=list)
+    allocations: list[Allocation] = Field(default_factory=list)
     role_logs: dict[str, list[LogEntry]] = Field(default_factory=dict)
     interaction_protocol: list[InteractionProtocol] = Field(default_factory=list)
     role_permissions: list[RolePermission] = Field(default_factory=list)
     escalation_records: list[EscalationRecord] = Field(default_factory=list)
     agent_cards: list[AgentCard] = Field(default_factory=list)
+    validation_settings: list[ValidationSetting] = Field(default_factory=list)

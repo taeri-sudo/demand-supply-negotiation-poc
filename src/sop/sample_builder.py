@@ -2,7 +2,8 @@
 
 Favorita 원본(`data/raw/favorita/`)에서 고객사 6곳과 우리 회사 제품 범위(`FAMILY_MAPPING`의
 범위 안 상품군)의 일별 POS를 읽어 (고객사, item) 인스턴스를 고르고, 그 위에 수주 생성기로
-주문 이력을 만들어 `data/generated/`에 고정 파일로 저장한다. 원본과 같이 저장소에는
+주문 이력(납기와 납품한 양 포함)을 만들고, supply_coordination이 읽는 나머지 입력(사람이 정한 수량, 계약 조건, 재고·생산 중 물량,
+라인 기준 정보 — `supply_sample.py`)도 만들어 `data/generated/`에 고정 파일로 저장한다. 원본과 같이 저장소에는
 포함하지 않는다(Kaggle 대회 데이터 재배포 조건 — DESIGN.md "데이터 출처"). 고정 시드로
 같은 파일을 다시 만들 수 있으나, 생성기나 파라미터를 바꾸면 결과가 달라지므로 그때는 다시
 만들어야 한다(AGENT_NODE_LIST.md "수주 데이터 생성기" 조건 4).
@@ -27,7 +28,8 @@ from .favorita_loader import (
     store_to_company_id,
     to_boundary_format,
 )
-from .order_generator import CustomerPolicy, PolicyChange, generate_orders
+from .order_generator import CustomerPolicy, PolicyChange, generate_orders, simulate_deliveries
+from .supply_sample import build_supply_inputs
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RAW_DIR = REPO_ROOT / "data" / "raw" / "favorita"
@@ -260,6 +262,7 @@ def build_sample(
         orders = generate_orders(
             pos[["date", "quantity", "promotion"]], policy, item_id, start, DATA_END.date(), BASE_SEED  # pyright: ignore[reportArgumentType] -- .loc 조회값이 Scalar로 추론되나 실제는 str
         )
+        orders["delivered_quantity"] = simulate_deliveries(orders, policy.moq, DATA_END.date(), BASE_SEED)
         order_frames.append(orders)
         instance_rows.append(
             {
@@ -288,6 +291,11 @@ def build_sample(
             }
             for s in used_stores
         ]
+    )
+
+    supply_inputs = build_supply_inputs(
+        orders_all, pd.DataFrame(instance_rows), {CUSTOMER_POLICIES[s].company_id: CUSTOMER_POLICIES[s].moq for s in used_stores},
+        DATA_END,
     )
 
     # 상품군 단위 월별 POS(category 범위)
@@ -323,6 +331,8 @@ def build_sample(
     _write_csv(contracts, out_dir / "contracts.csv")
     _write_csv(similar_rows, out_dir / "similar_items.csv")
     _write_csv(pd.DataFrame(instance_rows), out_dir / "instances.csv")
+    for name, frame in supply_inputs.items():
+        _write_csv(frame, out_dir / name)
     meta = {
         "data_end": DATA_END.date().isoformat(),
         "base_seed": BASE_SEED,

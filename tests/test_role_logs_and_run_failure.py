@@ -22,7 +22,7 @@ from sop.forecast_validation import VALIDATOR_ROLE_TAG
 from sop.state import ForecastRecord, RolePermission, State
 from sop.validation_agent import process_pending_validations
 from test_forecast_rerun import AGENT_ID, DEFAULT_ID, TREND_ID, first_run, make
-from validation_fixtures import FORECAST, SUPPLY, forecast_rules, make_store, take_verdict_signals, validate_and_allocate
+from validation_fixtures import FORECAST, SUPPLY, forecast_rules, make_store, take_verdict_signals, validate_and_receive
 
 pytestmark = pytest.mark.anyio
 
@@ -88,28 +88,26 @@ async def test_the_validation_log_entry_carries_the_causes_and_the_rationale():
 async def test_the_merged_log_follows_seq_across_roles():
     store = make_store([ForecastRecord(agent_id="COMPANY-A:RAMEN", company_id="COMPANY-A", item_id="RAMEN")])
     await run_forecast_select_and_submit(store, FORECAST, "COMPANY-A", "RAMEN", fixed_assumptions("RAMEN"))
-    validate_and_allocate(store)
+    validate_and_receive(store)
 
     merged = store.negotiation_log(FORECAST)
 
-    assert {e.role_tag for e in merged} == {FORECAST, VALIDATOR_ROLE_TAG, SUPPLY}
+    assert {e.role_tag for e in merged} == {FORECAST, VALIDATOR_ROLE_TAG}
     assert [e.seq for e in merged] == list(range(1, len(merged) + 1))  # 역할을 가로질러 하나의 순번
-    assert [e.event for e in merged] == [
-        "scenario_decided", "validation_passed", "forwarded", "allocation_candidate_generated",
-    ]
+    assert [e.event for e in merged] == ["scenario_decided", "validation_passed", "forwarded"]
     assert "negotiation_log" not in State.model_fields  # 저장하지 않고 합쳐 읽는다
-    assert set(store.state.role_logs) == {FORECAST, VALIDATOR_ROLE_TAG, SUPPLY}
+    assert set(store.state.role_logs) == {FORECAST, VALIDATOR_ROLE_TAG}
 
 
 def test_a_role_can_write_only_its_own_log():
     permissions = [
-        RolePermission(role_tag=FORECAST, field_path=f"role_logs.{FORECAST}", access="w"),
-        RolePermission(role_tag=SUPPLY, field_path=f"role_logs.{SUPPLY}", access="w"),
+        RolePermission(role_tag=FORECAST, field_path=f"role_logs.{FORECAST}", access="a"),
+        RolePermission(role_tag=SUPPLY, field_path=f"role_logs.{SUPPLY}", access="a"),
     ]
     store = StateStore(State(role_permissions=permissions))
 
     store.append_log(FORECAST, "scenario_decided", agent_id="A")
-    store.append_log(SUPPLY, "allocation_candidate_generated")
+    store.append_log(SUPPLY, "allocation_decided")
     with pytest.raises(PermissionDenied):
         store.append_log("forecast_validation", "validation_passed")  # 자기 로그 쓰기 권한이 없는 역할
     with pytest.raises(PermissionDenied):
@@ -122,7 +120,7 @@ def test_a_role_can_write_only_its_own_log():
 
 
 def test_event_names_are_a_fixed_set_and_values_go_in_fields():
-    store = StateStore(State(role_permissions=[RolePermission(role_tag=FORECAST, field_path="role_logs.forecast", access="w")]))
+    store = StateStore(State(role_permissions=[RolePermission(role_tag=FORECAST, field_path="role_logs.forecast", access="a")]))
 
     with pytest.raises(ValidationError):
         store.append_log(FORECAST, "forwarded_to_supply_coordination_A_2026-01-01")  # pyright: ignore[reportArgumentType]
@@ -187,11 +185,13 @@ async def test_a_first_run_that_fails_opens_an_escalation_at_once_and_leaves_the
     assert "RuntimeError" in entry.payload["exception"] and "attempt" not in entry.payload
     (escalation,) = store.get_field(FORECAST, "escalation_records")
     assert (escalation.reason, escalation.mode, escalation.status, escalation.agent_id, escalation.trigger_edge) == (
-        "forecast_run_error", "intervention", "open", AGENT_ID, "forecast->human_manager",
+        "forecast_run_error", "intervention", "open", AGENT_ID, "forecast->system_operator",
     )
+    assert escalation.target_role == "system_operator"
     assert "check_drivers" in escalation.rationale and "RuntimeError" in escalation.rationale
     assert urgency_of(escalation.reason) == "emergency"
-    assert store.queue(VALIDATOR_ROLE_TAG).empty() and store.queue("human_manager").qsize() == 1
+    assert store.queue(VALIDATOR_ROLE_TAG).empty() and store.queue("system_operator").qsize() == 1
+    assert store.queue("human_manager").empty()
     # 그 인스턴스만 멈춘다: 새로 계산한 값도 보류되고 다른 인스턴스는 진행한다
     assert await run_forecast_select_and_submit(store, FORECAST, "CUST-01", "ITEM-1", fixed_assumptions("RAMEN")) is False
     assert await run_forecast_select_and_submit(store, FORECAST, "COMPANY-A", "RAMEN", fixed_assumptions("RAMEN")) is True
@@ -284,7 +284,7 @@ async def test_a_hold_that_cannot_be_written_applies_none_of_the_log_the_escalat
     full = instance_store()
     without_log_permission = [
         p for p in full.state.role_permissions
-        if not (p.role_tag == FORECAST and p.field_path == f"role_logs.{FORECAST}" and p.access == "w")
+        if not (p.role_tag == FORECAST and p.field_path == f"role_logs.{FORECAST}" and p.access == "a")
     ]
     store = StateStore(full.state.model_copy(update={"role_permissions": without_log_permission}))
     before = store.state

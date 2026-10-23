@@ -1,8 +1,9 @@
-"""`interaction_protocol[]` 조회 헬퍼. 검증agent가 edge를 하드코딩하지 않고 이 표를 읽는다(MILESTONES.md 공통 규칙 1)."""
+"""`interaction_protocol[]` 조회 헬퍼. 엣지의 기준값은 코드에 두지 않고 이 표에서 읽는다(MILESTONES.md 공통 규칙 1).
+
+항목의 조회 키는 `(edge, escalation_trigger)`다(같은 엣지에 트리거가 여러 개일 수 있다). 두 역할 사이 엣지는 `scope`로도 찾는다.
+"""
 
 from .state import InteractionProtocol
-
-HUMAN_ROLE = "human_manager"
 
 
 def find_edge_entry(entries: list[InteractionProtocol], role_a: str, role_b: str) -> InteractionProtocol | None:
@@ -17,6 +18,11 @@ def find_edge_entry(entries: list[InteractionProtocol], role_a: str, role_b: str
     return None
 
 
-def find_edges_of(entries: list[InteractionProtocol], role_tag: str) -> list[InteractionProtocol]:
-    """역할이 다른 agent와 맺은 edge 항목들(사람에게 가는 알림·escalation 엣지는 제외)."""
-    return [e for e in entries if role_tag in e.scope and HUMAN_ROLE not in e.scope]
+def find_protocol_entry(
+    entries: list[InteractionProtocol], edge: str, escalation_trigger: str
+) -> InteractionProtocol | None:
+    """같은 엣지에 트리거가 여러 개일 수 있어 `(edge, escalation_trigger)`로 찾는다."""
+    for entry in entries:
+        if entry.edge == edge and entry.escalation_trigger == escalation_trigger:
+            return entry
+    return None

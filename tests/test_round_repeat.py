@@ -8,7 +8,7 @@ from sop.round_repeat import consecutive_repeats, exchange_reason, repeat_escala
 from sop.state import Exchange, InteractionProtocol, SuspectedCause, ValidationResult
 
 DUMMY_EDGE = InteractionProtocol(
-    edge="dummy_hub<->dummy_plan", max_rounds=5, repeat_escalation_threshold=2, scope=["dummy_hub", "dummy_plan"]
+    edge="dummy_hub<->dummy_plan", max_exchanges=5, repeat_escalation_threshold=2, scope=["dummy_hub", "dummy_plan"]
 )
 
 
@@ -22,11 +22,11 @@ def exchange(round_, reason=None, role="dummy_plan", failed_cause=None) -> Excha
     )
 
 
-def test_the_same_reason_twice_in_a_row_trips_before_max_rounds_is_used_up():
+def test_the_same_reason_twice_in_a_row_trips_before_max_exchanges_is_used_up():
     exchanges = [exchange(1, "capacity_short"), exchange(2, "capacity_short")]
 
     assert repeat_escalation_reason([DUMMY_EDGE], "dummy_hub", "dummy_plan", exchanges) == "capacity_short"
-    assert len(exchanges) < (DUMMY_EDGE.max_rounds or 0)  # max_rounds 소진 경로와 다르다
+    assert len(exchanges) < (DUMMY_EDGE.max_exchanges or 0)  # max_exchanges 소진 경로와 다르다
 
 
 def test_alternating_reasons_do_not_trip():

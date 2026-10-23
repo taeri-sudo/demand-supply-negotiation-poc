@@ -6,6 +6,10 @@ agent 판단 로직은 이 모듈의 함수로만 외부 데이터를 읽는다.
 대응하는 이름을 쓴다. 단, 식별자는 GS1(GTIN/GLN)이 아니라 샘플 내부 식별자
 (`CUST-xx`, `ITEM-nnn`)를 그대로 쓴다 — 샘플 데이터에 대응하는 실제 코드가 없다.
 
+supply_coordination이 읽는 입력(수주, 사람이 정한 수량, 계약 조건, 재고·생산 중 물량, 라인 기준 정보)도 이 모듈의 함수로 읽는다.
+수주(`load_sales_orders`)는 forecast의 주문 이력(`load_orders`)과 같은 파일이고, 납기와 납품한 양이 붙어 있다. 납품이 끝난 수주는
+forecast의 주문 이력이 되고, 수주잔고(수주 - 납품한 양)와 미납분(수주잔고 중 납기가 지난 것)은 이 데이터에서 계산한다.
+
 프로모션 여부는 `true`/`false`/`null`(기록 없음) 세 상태의 pandas `boolean`이다.
 수주 생성기 내부 정책(`generator_params.json`)은 의도적으로 읽는 함수를 두지 않는다 —
 현실의 공급사도 고객사의 재고 정책을 모른다.
@@ -47,6 +51,78 @@ def load_orders(data_dir: str | Path | None = None) -> pd.DataFrame:
         parse_dates=["order_date"],
         dtype={"promotion": "boolean", "is_first_order": "bool", "is_synthetic": "bool"},
     )
+
+
+def load_sales_orders(data_dir: str | Path | None = None) -> pd.DataFrame:
+    """수주(EDI 850에 대응): demand_id, company_id, item_id, quantity, order_date, due_date, delivered_quantity.
+
+    `due_date`는 고객사 도착 기준이다. 스냅샷 기준일 뒤에 납기가 오는 수주(앞으로 납기가 올 수주)와 납기가 지났지만 일부만 납품된
+    수주(미납분)가 포함된다.
+    """
+    frame = pd.read_csv(_dir(data_dir) / "orders.csv", parse_dates=["order_date", "due_date"])
+    return frame[
+        ["demand_id", "company_id", "item_id", "quantity", "order_date", "due_date", "delivered_quantity"]
+    ]
+
+
+def load_manual_quantities(data_dir: str | Path | None = None) -> pd.DataFrame:
+    """사람이 정한 수량: demand_id, source("manual"), input_reason(new_customer/new_product/promotion), company_id(없을 수 있음),
+    item_id, quantity, entered_at. 주문이 없는 수량이다."""
+    return pd.read_csv(_dir(data_dir) / "manual_quantities.csv", parse_dates=["entered_at"])
+
+
+def load_min_commitments(data_dir: str | Path | None = None) -> pd.DataFrame:
+    """최소 구매 약정: company_id, item_id, binding(구속력 있음), total_quantity, period_start, period_end."""
+    return pd.read_csv(
+        _dir(data_dir) / "min_commitments.csv", parse_dates=["period_start", "period_end"], dtype={"binding": "bool"}
+    )
+
+
+def load_supply_guarantees(data_dir: str | Path | None = None) -> pd.DataFrame:
+    """공급 보장 물량: company_id, item_id, quantity(계획 주기당)."""
+    return pd.read_csv(_dir(data_dir) / "supply_guarantees.csv")
+
+
+def load_contract_units(data_dir: str | Path | None = None) -> pd.DataFrame:
+    """계약 단위: 상품별 기본값(item_id만 있는 행)과 고객사별 덮어쓰기(company_id만 있는 행). 값을 찾을 때는 `contract_unit`을 쓴다."""
+    return pd.read_csv(_dir(data_dir) / "contract_units.csv")
+
+
+def contract_unit(units: pd.DataFrame, company_id: str | None, item_id: str) -> float:
+    """수량이 따라야 하는 계약 단위. 고객사별 덮어쓰기가 있으면 그 값, 없으면 상품별 기본값이다. 둘 다 없으면 KeyError."""
+    if company_id is not None:
+        override = units[(units["company_id"] == company_id) & units["item_id"].isna()]
+        if not override.empty:
+            return float(override["unit"].iloc[0])
+    default = units[(units["item_id"] == item_id) & units["company_id"].isna()]
+    if default.empty:
+        raise KeyError(f"계약 단위가 없음: {company_id}/{item_id}")
+    return float(default["unit"].iloc[0])
+
+
+def load_inventory(data_dir: str | Path | None = None) -> pd.DataFrame:
+    """item별 재고: item_id, quantity. 물리적 실행(외부 경계)의 결과를 대신하는 고정 스텁이다."""
+    return pd.read_csv(_dir(data_dir) / "inventory.csv")
+
+
+def load_work_in_progress(data_dir: str | Path | None = None) -> pd.DataFrame:
+    """생산 중 물량(계획된 생산량 - 완료된 양): item_id, quantity, demand_ref(그 물량이 묶인 수주의 demand_id). 고정 스텁이다."""
+    return pd.read_csv(_dir(data_dir) / "work_in_progress.csv")
+
+
+def load_line_assignments(data_dir: str | Path | None = None) -> pd.DataFrame:
+    """라인 기준 정보: item_id, line_id, preference(primary/alternate), valid_from. 어느 item을 어느 라인에서 만들 수 있는가(N:M)."""
+    return pd.read_csv(_dir(data_dir) / "line_assignments.csv", parse_dates=["valid_from"])
+
+
+def primary_line(assignments: pd.DataFrame, item_id: str, on: pd.Timestamp) -> str:
+    """`on` 시점에 item의 주 라인(`preference: "primary"`, 적용 시작일이 `on` 이전인 것 중 가장 늦은 것). 없으면 KeyError. M4는 주 라인만 쓴다."""
+    rows = assignments[
+        (assignments["item_id"] == item_id) & (assignments["preference"] == "primary") & (assignments["valid_from"] <= on)
+    ]
+    if rows.empty:
+        raise KeyError(f"{on.date()} 시점에 주 라인이 없는 item: {item_id}")
+    return str(rows.sort_values("valid_from")["line_id"].iloc[-1])
 
 
 def load_pos_daily(data_dir: str | Path | None = None) -> pd.DataFrame:

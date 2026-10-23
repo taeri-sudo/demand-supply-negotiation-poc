@@ -10,15 +10,14 @@ import pytest
 from assumption_fixtures import distinct, fixed_assumptions
 from sop import forecast_validation, stats_adapter
 from sop.access import PermissionDenied
-from sop.escalation_records import ESCALATION_URGENCY, urgency_of
+from sop.escalation_records import ESCALATION_REASONS, rule_of, urgency_of
 from sop.forecast_human_manager import new_forecast_escalation
 from sop.forecast_steps import ForecastRerunHandling
 from sop.forecast_supply_allocation import (
-    allocate_validated_forecast,
     check_forecast_verdict,
-    forecast_supply_protocol_entry,
     forward_validated_forecast,
-    process_pending_allocations,
+    process_forwarded_forecasts,
+    receive_forwarded_forecast,
     run_forecast_select_and_submit,
     run_forecast_steps_select_and_submit,
 )
@@ -26,13 +25,14 @@ from sop.forecast_validation import VALIDATOR_ROLE_TAG, monthly_order_history, s
 from sop.state import (
     Assumption,
     ForecastRecord,
-    InteractionProtocol,
     RolePermission,
     Scenario,
     SuspectedCause,
     ValidationResult,
+    ValidationSetting,
 )
 from sop.validation_agent import VALIDATION_ERROR_REASON, ValidationRules, process_pending_validations, validate_job
+from sop.validation_settings import FORECAST_ROLE_TAG
 from test_forecast_rerun import AGENT_ID, DEFAULT_ID, TREND_ID, first_run, make
 from validation_fixtures import (
     FORECAST,
@@ -44,7 +44,7 @@ from validation_fixtures import (
     write_verdict,
     make_store,
     take_verdict_signals,
-    validate_and_allocate,
+    validate_and_receive,
 )
 
 pytestmark = pytest.mark.anyio
@@ -92,8 +92,7 @@ async def test_the_validator_pushes_the_verdict_to_the_writer_only_and_not_to_th
     assert record_of(store).validation.status == "passed"  # 판정은 레코드에 쓴다
     message = store.queue("forecast").get_nowait()
     assert message["record_path"] == "forecast_records[0]" and message["written_by"] == VALIDATOR_ROLE_TAG
-    assert all_channels_empty(store, "forecast", SUPPLY, "allocation_candidates")
-    assert store.get_field(SUPPLY, "allocation_candidates") == []
+    assert all_channels_empty(store, "forecast", SUPPLY)
 
 
 async def test_the_forecast_itself_forwards_a_passed_record_to_the_coordinator_once():
@@ -103,10 +102,9 @@ async def test_the_forecast_itself_forwards_a_passed_record_to_the_coordinator_o
 
     assert forward_validated_forecast(store, FORECAST, "COMPANY-A", "RAMEN") is True
     assert forward_validated_forecast(store, FORECAST, "COMPANY-A", "RAMEN") is False  # 같은 판정을 두 번 보내지 않는다
-    (candidate,) = process_pending_allocations(store, SUPPLY)
+    (received,) = process_forwarded_forecasts(store, SUPPLY)
 
-    assert candidate.allocation == {RAMEN: 120.0}
-    assert store.get_field(SUPPLY, "allocation_candidates") == [candidate]
+    assert received.agent_id == RAMEN and received.scenario is not None and received.scenario.value == 120.0
 
 
 async def test_a_record_that_is_not_passed_is_not_forwarded():
@@ -120,24 +118,31 @@ async def test_a_record_that_is_not_passed_is_not_forwarded():
     assert store.queue(SUPPLY).empty()
 
 
-DUMMY_RULES = {"dummy_writer": ValidationRules(instance_id=lambda r: r.agent_id, check=lambda r: [])}
+DUMMY_RULES = {FORECAST: ValidationRules(instance_id=lambda r: r.agent_id, check=lambda r: [])}
+DUMMY_VALIDATOR = "dummy_validation"
+DUMMY_VALIDATOR_PERMISSIONS = tuple(
+    RolePermission(role_tag=DUMMY_VALIDATOR, field_path=field, access=access)  # pyright: ignore[reportArgumentType]
+    for field, access in [
+        ("forecast_records", "r"), ("forecast_records[*].validation", "w"), ("escalation_records", "r"),
+        ("escalation_records", "w"), (f"role_logs.{DUMMY_VALIDATOR}", "a"), ("role_logs", "r"),
+    ]
+)
 
 
-def dummy_store(with_entry: bool):
-    entries = [InteractionProtocol(edge="dummy_writer<->dummy_consumer", scope=["dummy_writer", "dummy_consumer"])]
-    extra = (RolePermission(role_tag="dummy_writer", field_path="forecast_records", access="w"),)
-    store = make_store(
-        [ForecastRecord(agent_id=RAMEN, company_id="COMPANY-A", item_id="RAMEN")],
-        protocol=entries if with_entry else [forecast_supply_protocol_entry()],
-        extra_permissions=extra,
-    )
+def dummy_store(validator: str | None = VALIDATOR_ROLE_TAG):
+    """dummy_writer가 쓴 기록 하나. `validator`를 주면 `validation_settings`에 forecast의 검증agent로 올린다(None이면 설정에 행이 없다)."""
+    settings = [] if validator is None else [
+        ValidationSetting(role_tag=FORECAST_ROLE_TAG, validator_role_tag=validator, validation_point="per_record")
+    ]
+    extra = (RolePermission(role_tag="dummy_writer", field_path="forecast_records", access="w"), *DUMMY_VALIDATOR_PERMISSIONS)
+    store = make_store([ForecastRecord(agent_id=RAMEN, company_id="COMPANY-A", item_id="RAMEN")], extra_permissions=extra, settings=settings)
     scenario = Scenario(value=1.0, assumption_ids=["a"], derivation="chosen")
     store.set_field("dummy_writer", "forecast_records[0]", record_of(store).model_copy(update={"scenario": scenario}))
-    return store  # 기록이 "검증 대기"가 되어 검증agent에게 신호가 갔다(쓴 역할은 dummy_writer)
+    return store  # 설정에 행이 있으면 기록이 "검증 대기"가 되어 그 검증agent에게 신호가 갔다(쓴 역할은 dummy_writer)
 
 
 def test_the_verdict_signals_the_records_author_whoever_wrote_the_record():
-    store = dummy_store(with_entry=True)
+    store = dummy_store()
 
     results = process_pending_validations(store, VALIDATOR_ROLE_TAG, DUMMY_RULES)
 
@@ -147,8 +152,8 @@ def test_the_verdict_signals_the_records_author_whoever_wrote_the_record():
 
 
 def test_a_failed_verdict_signals_the_same_channel():
-    store = dummy_store(with_entry=True)
-    rules = {"dummy_writer": ValidationRules(
+    store = dummy_store()
+    rules = {FORECAST: ValidationRules(
         instance_id=lambda r: r.agent_id, check=lambda r: [SuspectedCause(type="method_selection")]
     )}
 
@@ -158,17 +163,33 @@ def test_a_failed_verdict_signals_the_same_channel():
     assert store.queue("forecast").qsize() == 1
 
 
-def test_an_edge_without_a_protocol_entry_is_rejected():
-    store = dummy_store(with_entry=False)
+def test_an_author_without_a_validation_setting_never_awaits_validation():
+    store = dummy_store(validator=None)
 
-    with pytest.raises(ValueError, match="edge"):
-        process_pending_validations(store, VALIDATOR_ROLE_TAG, DUMMY_RULES)
+    assert all_channels_empty(store, VALIDATOR_ROLE_TAG, DUMMY_VALIDATOR)  # 검증 대상이 아니라 신호가 가지 않는다
+    store.queue(VALIDATOR_ROLE_TAG).put_nowait({"field_path": "forecast_records[0]", "written_by": "dummy_writer"})
+    assert process_pending_validations(store, VALIDATOR_ROLE_TAG, DUMMY_RULES) == []  # 강제로 보낸 신호도 건너뛴다
+    assert record_of(store).validation is None
 
 
-def test_adding_only_a_protocol_entry_makes_a_new_edge_pass_through_the_same_flow():
-    assert [r.status for r in process_pending_validations(
-        dummy_store(with_entry=True), VALIDATOR_ROLE_TAG, DUMMY_RULES
-    )] == ["passed"]
+def test_a_validator_other_than_the_one_in_the_validation_settings_skips_the_job():
+    store = dummy_store(validator=DUMMY_VALIDATOR)
+    store.queue(VALIDATOR_ROLE_TAG).put_nowait({"field_path": "forecast_records[0]", "written_by": "dummy_writer"})
+
+    assert process_pending_validations(store, VALIDATOR_ROLE_TAG, DUMMY_RULES) == []
+
+    assert record_of(store).validation is None
+
+
+def test_adding_only_a_validation_setting_makes_a_new_validator_pass_through_the_same_flow():
+    store = dummy_store(validator=DUMMY_VALIDATOR)
+
+    assert store.queue(DUMMY_VALIDATOR).qsize() == 1 and store.queue(VALIDATOR_ROLE_TAG).empty()
+    results = process_pending_validations(store, DUMMY_VALIDATOR, DUMMY_RULES)
+
+    assert [r.status for r in results] == ["passed"]
+    assert record_of(store).validation.validator_role_tag == DUMMY_VALIDATOR  # pyright: ignore[reportOptionalMemberAccess]
+    assert store.queue("forecast").qsize() == 1
 
 
 # --- failed: 작성agent(forecast)가 자기 기록의 판정을 확인해 처리한다 --------------------------------------------
@@ -190,7 +211,6 @@ async def test_failed_carries_every_cause_and_goes_only_to_the_writer():
     assert all(c.type == "assumption" and c.drivers is None for c in validation.suspected_causes)
     assert store.queue("forecast").qsize() == 1
     assert all_channels_empty(store, SUPPLY)  # 다음 agent에게는 가지 않는다
-    assert store.get_field(SUPPLY, "allocation_candidates") == []
 
 
 def narrow_history_around_default():
@@ -214,7 +234,6 @@ async def test_flag_rerun_resubmit_and_final_pass_with_real_forecast_results():
     failed = record_of(store).validation
     assert failed.status == "failed"
     assert [(c.issue, c.assumption_id) for c in failed.suspected_causes] == [("value_out_of_range", TREND_ID)]
-    assert store.get_field(SUPPLY, "allocation_candidates") == []
 
     (signal,) = take_verdict_signals(store)  # 판정은 작성agent의 채널로 도착한다
     assert signal["record_path"] == "forecast_records[0]"
@@ -229,8 +248,8 @@ async def test_flag_rerun_resubmit_and_final_pass_with_real_forecast_results():
     (signal,) = take_verdict_signals(store)
     assert signal["record_path"] == "forecast_records[0]"
     assert await check_forecast_verdict(store, FORECAST, handling) == "forwarded"
-    (candidate,) = process_pending_allocations(store, SUPPLY)
-    assert candidate.allocation == {AGENT_ID: after_rerun.scenario.value}
+    (received,) = process_forwarded_forecasts(store, SUPPLY)
+    assert received.agent_id == AGENT_ID and received.scenario == after_rerun.scenario
 
 
 async def test_all_causes_of_one_flag_are_handled_in_a_single_rerun():
@@ -355,19 +374,20 @@ async def test_an_error_opens_an_escalation_at_once_and_only_that_instance_stops
 
     process_pending_validations(store, VALIDATOR_ROLE_TAG, failing_rules({RAMEN: 99}, calls))
     forward_passed(store)
-    candidates = process_pending_allocations(store, SUPPLY)
+    received = process_forwarded_forecasts(store, SUPPLY)
 
     assert calls[RAMEN] == 1  # 재시도하지 않는다
     assert record_of(store, 0).validation.status == "error"
     (escalation,) = store.get_field(FORECAST, "escalation_records")
     assert (escalation.reason, escalation.trigger_edge, escalation.agent_id, escalation.mode, escalation.status) == (
-        VALIDATION_ERROR_REASON, f"{VALIDATOR_ROLE_TAG}->human_manager", RAMEN, "intervention", "open",
+        VALIDATION_ERROR_REASON, f"{VALIDATOR_ROLE_TAG}->system_operator", RAMEN, "intervention", "open",
     )
+    assert escalation.target_role == "system_operator"
     assert "RuntimeError" in escalation.rationale
-    assert store.queue("human_manager").qsize() == 1
+    assert store.queue("system_operator").qsize() == 1 and store.queue("human_manager").empty()
     assert record_of(store, 1).validation.status == "passed"  # 다른 인스턴스는 진행한다
-    assert [c.allocation for c in candidates] == [{SNACK: 80.0}]
-    assert store.get_field(SUPPLY, "allocation_candidates") == candidates  # 멈춘 인스턴스는 전달되지 않는다
+    assert [r.agent_id for r in received] == [SNACK]  # 멈춘 인스턴스는 전달되지 않는다
+    assert received[0].scenario is not None and received[0].scenario.value == 80.0
 
 
 async def test_an_error_is_not_retried_even_when_a_second_run_would_pass():
@@ -410,15 +430,15 @@ async def test_a_job_that_reaches_the_validator_for_a_held_instance_is_skipped_a
     assert record_of(store).validation == before  # 판정하지 않았다
     # 이미 passed인 기록이라도 보류 중이면 forecast는 보내지 않고, 보낸 신호가 있어도 supply_coordination은 만들지 않는다
     assert forward_validated_forecast(store, FORECAST, "COMPANY-A", "RAMEN") is False
-    assert allocate_validated_forecast(store, SUPPLY, {"field_path": "forecast_records[0]"}) is None
+    assert receive_forwarded_forecast(store, SUPPLY, {"field_path": "forecast_records[0]"}) is None
 
 
-async def test_each_passed_submission_creates_exactly_one_candidate():
+async def test_each_passed_submission_is_received_exactly_once():
     store = two_instance_store()
     await submit(store, "RAMEN")
 
-    assert len(validate_and_allocate(store)) == 1
-    assert validate_and_allocate(store) == []  # 같은 판정은 다시 보내지 않는다
+    assert len(validate_and_receive(store)) == 1
+    assert validate_and_receive(store) == []  # 같은 판정은 다시 보내지 않는다
 
 
 # --- escalation 긴급도 대응표 -------------------------------------------------------------------------------
@@ -427,21 +447,35 @@ async def test_each_passed_submission_creates_exactly_one_candidate():
 def test_urgency_table_splits_missing_values_and_failures_from_confirmations():
     assert urgency_of("validation_error") == "emergency"
     assert urgency_of("no_computable_assumption") == "emergency"
-    assert urgency_of("options_exhausted") == "emergency"
+    assert urgency_of("options_exhausted") == "warning"  # 재실행 전에 계산된 값이 남아 있어 값은 있다
     assert urgency_of("selection_unresolved") == "warning"
     assert urgency_of("commitment_gap") == "warning"
     with pytest.raises(ValueError):
         urgency_of("unknown_reason")
 
 
-def test_every_reason_the_code_creates_has_an_urgency():
+def test_every_reason_the_code_creates_is_in_the_reason_table():
     from typing import get_args
 
     from sop.forecast_human_manager import ForecastEscalationReason
 
     created = {VALIDATION_ERROR_REASON, *get_args(ForecastEscalationReason)}
-    assert created <= set(ESCALATION_URGENCY)
-    assert set(ESCALATION_URGENCY.values()) == {"emergency", "warning"}
+    supply_coordination = {"commitments_exceed_capacity", "pegged_exceed_capacity", "allocation_invalid", "commitment_gap"}
+    assert (created | supply_coordination) == set(ESCALATION_REASONS)
+    assert {rule.urgency for rule in ESCALATION_REASONS.values()} == {"emergency", "warning"}
+
+
+def test_the_reason_table_assigns_system_errors_to_the_system_operator_and_business_decisions_to_the_human_manager():
+    system = {r for r, rule in ESCALATION_REASONS.items() if rule.target_role == "system_operator"}
+    assert system == {
+        "forecast_run_error", "no_next_agent", "multiple_next_agents", "validation_error", "allocation_invalid",
+    }
+    assert {r for r in ESCALATION_REASONS if r not in system} == {
+        "no_computable_assumption", "selection_unresolved", "options_exhausted", "commitments_exceed_capacity",
+        "pegged_exceed_capacity", "commitment_gap",
+    }
+    assert [r for r, rule in ESCALATION_REASONS.items() if rule.mode == "notice"] == ["commitment_gap"]
+    assert rule_of("forecast_run_error").mode == "intervention"
 
 
 # --- 실행 한 번에 기록은 한 번만 쓰고 검증 대기 신호는 최대 한 번 나간다 ------------------------------------------------

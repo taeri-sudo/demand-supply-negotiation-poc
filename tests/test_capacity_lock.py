@@ -12,7 +12,7 @@ pytestmark = pytest.mark.anyio
 def make_store(remaining: float = 100) -> StateStore:
     state = State(
         capacity_pools=[
-            CapacityPool(pool_id="POOL-1", total_capacity=100, remaining_capacity=remaining)
+            CapacityPool(line_id="LINE-1", total_capacity=100, remaining_capacity=remaining)
         ],
         role_permissions=[
             RolePermission(role_tag="supply_coordination", field_path="capacity_pools", access="r"),
@@ -39,7 +39,7 @@ async def _unsafe_decrement(store: StateStore, amount: float) -> None:
 
 async def _locked_decrement(store: StateStore, amount: float) -> None:
     """_unsafe_decrement와 동일한 로직이되, Lock으로 read-modify-write를 감싼다."""
-    async with store.lock("capacity_pools:POOL-1"):
+    async with store.lock("capacity_pools:LINE-1"):
         pools = store.get_field("supply_coordination", "capacity_pools")
         pool = pools[0]
         await asyncio.sleep(0)
@@ -87,7 +87,7 @@ async def test_adjust_capacity_pool_helper_is_safe_under_concurrency():
             adjust_capacity_pool(
                 store,
                 "supply_coordination",
-                "POOL-1",
+                "LINE-1",
                 delta=-5,
                 reason="test",
             )

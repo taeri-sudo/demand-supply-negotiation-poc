@@ -4,6 +4,11 @@
 주문을 생성한다(AGENT_NODE_LIST.md "수주 데이터 생성기"). 이 모듈은 고객사의 행동을
 대신하는 외부 경계이며, forecast agent는 결과(POS, 주문)만 받는다.
 
+주문에는 납기(`due_date` = 주문일 + 리드타임, 고객사 도착 기준)와 수주 식별자(`demand_id`)가 붙는다. 스냅샷 기준일 뒤에
+납기가 오는 주문이 앞으로 납기가 올 수주다. 납품한 양(`delivered_quantity`)은 `simulate_deliveries`가 주문과 따로 만든다 —
+최근 납기 구간의 일부 주문은 일부만 납품돼 미납분이 된다. 고객사의 재고 정책은 주문했지만 아직 받지 못한 양을 가진 양에 넣는다
+(`pipeline`) — 그래서 납품을 기다리는 동안 같은 양을 다시 주문하지 않는다.
+
 정책은 (s, S) 정기발주다. 점검일마다 고객사는 자기 POS의 직전 `window_days`일
 평균·표준편차로 수요를 추정해 재고 위치(보유 + 발주 중)가 s 이하이면 S까지 채우는
 주문을 낸다(수량은 MOQ 배수로 올림).
@@ -38,6 +43,9 @@ REORDER_POINT_SAFETY_SHARE = 0.5  # s에 반영하는 안전재고 비율(S는 �
 PROMOTION_S_MULTIPLIER = 1.25  # 프로모션 중에는 S(와 s)를 올린다
 FIRST_ORDER_MULTIPLIER = 2.5  # 계약 시작일 첫 주문은 S의 2.5배(초기 진열·재고)
 PROMOTION_MARK_WINDOW_DAYS = 7  # 직전 7일 안에 프로모션 판매일이 있으면 주문에 프로모션 표시
+SHORT_DELIVERY_PROB = 0.12  # 최근 납기 구간의 주문 중 일부만 납품되는 비율 (초기값)
+SHORT_DELIVERY_FRACTIONS = (0.0, 0.5, 0.8)  # 일부만 납품될 때 납품되는 비율
+SHORT_DELIVERY_WINDOW_DAYS = 60  # 기준일 직전 이 기간에 납기가 온 주문만 미납이 생긴다(더 오래된 미납은 정산된 것으로 본다)
 
 
 class PolicyChange(BaseModel, frozen=True):
@@ -106,7 +114,7 @@ def generate_orders(
 
     `pos`는 그 고객사·item의 일별 POS(열: date, quantity, promotion). 음수 판매량(반품)은
     재고 소진에 반영하지 않는다. 반환 열: order_date, company_id, item_id, quantity,
-    is_first_order, promotion(true/false/null), is_synthetic(항상 False).
+    is_first_order, promotion(true/false/null), is_synthetic(항상 False), demand_id, due_date.
     """
     rng = np.random.default_rng(stable_seed(base_seed, policy.company_id, item_id))
     start, stop = pd.Timestamp(contract_start), pd.Timestamp(end)
@@ -145,6 +153,7 @@ def generate_orders(
 
     def record(day: pd.Timestamp, quantity: float, first: bool) -> None:
         mark = promo[day]
+        lead = 0 if first else policy.lead_time_days  # 첫 주문은 즉시 입고되는 초기 물량
         records.append(
             {
                 "order_date": day,
@@ -154,6 +163,8 @@ def generate_orders(
                 "is_first_order": first,
                 "promotion": None if pd.isna(mark) else bool(mark),
                 "is_synthetic": False,
+                "demand_id": f"ORD-{policy.company_id}-{item_id}-{len(records) + 1:04d}",
+                "due_date": day + pd.DateOffset(days=lead),
             }
         )
 
@@ -184,3 +195,30 @@ def generate_orders(
     orders = pd.DataFrame.from_records(records)
     orders["promotion"] = pd.array(orders["promotion"].tolist(), dtype="boolean")
     return orders
+
+
+def simulate_deliveries(orders: pd.DataFrame, moq: float, data_end: date, base_seed: int = 0) -> pd.Series:
+    """주문별 납품한 양(`delivered_quantity`). 주문과 별도의 난수열을 써서 주문 생성 결과를 바꾸지 않는다.
+
+    기준일 뒤에 납기가 오는 주문은 아직 납품하지 않았다(0). 기준일 직전 `SHORT_DELIVERY_WINDOW_DAYS` 안에 납기가 온 주문(첫 주문
+    제외)은 `SHORT_DELIVERY_PROB`의 확률로 일부만 납품되어(MOQ 배수로 내림) 납기가 지난 미납분이 생긴다. 그 밖의 납기가 지난 주문은 모두
+    납품했다. `orders`는 한 (고객사, item)의 주문이다(`generate_orders`의 결과).
+    """
+    if orders.empty:
+        return pd.Series(dtype=float)
+    first = orders.iloc[0]
+    rng = np.random.default_rng(stable_seed(base_seed + 1, str(first["company_id"]), str(first["item_id"])))
+    end = pd.Timestamp(data_end)
+    window_start = end - pd.DateOffset(days=SHORT_DELIVERY_WINDOW_DAYS)
+    delivered = []
+    for row in orders.itertuples():
+        short = rng.random() < SHORT_DELIVERY_PROB  # 난수는 항상 같은 수만큼 뽑아 어떤 주문이 일부 납품이어도 뒤 주문이 달라지지 않는다
+        fraction = float(rng.choice(SHORT_DELIVERY_FRACTIONS))
+        quantity = float(row.quantity)  # pyright: ignore[reportArgumentType]
+        if row.due_date > end:  # pyright: ignore[reportOperatorIssue]
+            delivered.append(0.0)
+        elif short and not row.is_first_order and row.due_date > window_start:  # pyright: ignore[reportOperatorIssue]
+            delivered.append(math.floor(round(quantity * fraction / moq, 9)) * moq)
+        else:
+            delivered.append(quantity)
+    return pd.Series(delivered, index=orders.index, dtype=float, name="delivered_quantity")

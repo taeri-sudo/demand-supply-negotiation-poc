@@ -9,17 +9,23 @@ from collections.abc import Mapping
 from sop.access import FieldWrite, StateStore
 from sop.agent_cards import default_agent_cards
 from sop.forecast_human_manager import ForecastEscalationReason, new_forecast_escalation
-from sop.forecast_supply_allocation import (
-    forecast_supply_protocol_entry,
-    forward_validated_forecast,
-    process_pending_allocations,
-)
+from sop.forecast_supply_allocation import forward_validated_forecast, process_forwarded_forecasts
 from sop.forecast_validation import VALIDATOR_ROLE_TAG, forecast_validation_rules
-from sop.state import AgentCard, AllocationCandidate, ForecastRecord, InteractionProtocol, RolePermission, State
+from sop.state import (
+    AgentCard,
+    ForecastRecord,
+    InteractionProtocol,
+    RolePermission,
+    State,
+    ValidationSetting,
+)
 from sop.validation_agent import ValidationRules, process_pending_validations
+from sop.validation_settings import default_validation_settings
 
 FORECAST = "forecast"
 SUPPLY = "supply_coordination"
+HUMAN = "human_manager"
+SYSTEM = "system_operator"
 WIDE_HISTORY = [0.0, 200.0]
 VERDICT_CHANNEL = FORECAST  # 채널은 agent의 role_tag 하나다
 
@@ -27,16 +33,21 @@ VERDICT_CHANNEL = FORECAST  # 채널은 agent의 role_tag 하나다
 _PERMISSIONS: list[tuple[str, str, str]] = [
     (FORECAST, "forecast_records", "r"), (FORECAST, "forecast_records", "w"),
     (FORECAST, "escalation_records", "r"), (FORECAST, "escalation_records", "w"), (FORECAST, "agent_cards", "r"),
-    (SUPPLY, "allocation_candidates", "r"), (SUPPLY, "allocation_candidates", "w"),
+    (SUPPLY, "allocations", "r"), (SUPPLY, "allocations", "w"),
     (SUPPLY, "forecast_records", "r"), (SUPPLY, "escalation_records", "r"), (SUPPLY, "agent_cards", "r"),
     (SUPPLY, "forecast_records[*].send_back", "w"),
     (VALIDATOR_ROLE_TAG, "forecast_records", "r"),
     (VALIDATOR_ROLE_TAG, "forecast_records[*].validation", "w"),
     (VALIDATOR_ROLE_TAG, "escalation_records", "r"), (VALIDATOR_ROLE_TAG, "escalation_records", "w"),
     (VALIDATOR_ROLE_TAG, "interaction_protocol", "r"),
-    # 로그: 각 역할은 자기 로그에만 쓰고, 모든 역할의 로그를 합쳐 읽을 수 있다
-    *((role, "role_logs", "r") for role in (FORECAST, SUPPLY, VALIDATOR_ROLE_TAG)),
-    *((role, f"role_logs.{role}", "w") for role in (FORECAST, SUPPLY, VALIDATOR_ROLE_TAG)),
+    # 사람의 처리: 담당 escalation 기록을 처리하고, human_manager는 값을 받는 forecast 기록의 필드를, system_operator는 판정 칸을 비운다
+    (HUMAN, "escalation_records", "r"), (HUMAN, "escalation_records", "w"), (HUMAN, "forecast_records", "r"),
+    *((HUMAN, f"forecast_records[*].{f}", "w") for f in ("scenario", "selection_basis", "validation", "forward_to", "send_back")),
+    (SYSTEM, "escalation_records", "r"), (SYSTEM, "escalation_records", "w"), (SYSTEM, "forecast_records", "r"),
+    (SYSTEM, "allocations", "r"), (SYSTEM, "forecast_records[*].validation", "w"), (SYSTEM, "allocations[*].validation", "w"),
+    # 로그: 각 역할은 자기 로그에 이어서 쓰기만 하고, 모든 역할의 로그를 합쳐 읽을 수 있다
+    *((role, "role_logs", "r") for role in (FORECAST, SUPPLY, VALIDATOR_ROLE_TAG, HUMAN, SYSTEM)),
+    *((role, f"role_logs.{role}", "a") for role in (FORECAST, SUPPLY, VALIDATOR_ROLE_TAG, HUMAN, SYSTEM)),
 ]
 
 
@@ -53,12 +64,13 @@ def make_store(
     protocol: list[InteractionProtocol] | None = None,
     extra_permissions: tuple[RolePermission, ...] = (),
     cards: list[AgentCard] | None = None,
+    settings: list[ValidationSetting] | None = None,
 ) -> StateStore:
-    entries = [forecast_supply_protocol_entry()] if protocol is None else protocol
     return StateStore(
         State(
-            forecast_records=records, interaction_protocol=entries, role_permissions=permissions(extra_permissions),
+            forecast_records=records, interaction_protocol=protocol or [], role_permissions=permissions(extra_permissions),
             agent_cards=default_agent_cards() if cards is None else cards,
+            validation_settings=default_validation_settings() if settings is None else settings,
         )
     )
 
@@ -89,11 +101,11 @@ def forward_passed(store: StateStore) -> int:
     return sent
 
 
-def validate_and_allocate(store: StateStore, rules: Mapping[str, ValidationRules] | None = None) -> list[AllocationCandidate]:
-    """검증agent 큐를 모두 판정하고, forecast가 통과한 기록을 보내면 supply_coordination이 모두 처리한다."""
+def validate_and_receive(store: StateStore, rules: Mapping[str, ValidationRules] | None = None) -> list[ForecastRecord]:
+    """검증agent 큐를 모두 판정하고, forecast가 통과한 기록을 보내면 supply_coordination이 받은 기록을 돌려준다."""
     process_pending_validations(store, VALIDATOR_ROLE_TAG, rules if rules is not None else forecast_rules())
     forward_passed(store)
-    return process_pending_allocations(store, SUPPLY)
+    return process_forwarded_forecasts(store, SUPPLY)
 
 
 def write_verdict(store: StateStore, role_tag: str, record_path: str, result) -> None:

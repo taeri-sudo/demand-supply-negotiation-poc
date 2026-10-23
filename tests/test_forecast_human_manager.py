@@ -17,17 +17,17 @@ from sop.forecast_assumption_definition import DEFAULT_ID, define_assumptions
 from sop.forecast_driver_check import check_drivers
 from sop.forecast_human_manager import (
     ESCALATION_EDGE,
-    find_protocol_entry,
     new_forecast_escalation,
     no_computable_rationale,
     selection_unresolved_protocol_entry,
 )
 from sop.forecast_supply_allocation import run_forecast_select_and_submit
+from sop.interaction_protocol import find_protocol_entry
 from sop.promotion_episodes import Episode
 from sop.state import Assumption, ForecastRecord, InteractionProtocol
 from test_data_source_judgment import empty_similar, make_inputs as make_plain_inputs, orders_from_pos, pos_frame
 from test_forecast_assumption_steps import make_inputs, run_pipeline
-from validation_fixtures import make_store as make_pipeline_store, validate_and_allocate
+from validation_fixtures import make_store as make_pipeline_store, validate_and_receive
 
 pytestmark = pytest.mark.anyio
 
@@ -45,12 +45,12 @@ def make_store() -> StateStore:
 
 
 async def run(store, item_id, assumptions, rationale=None):
-    """제출하고 검증agent와 supply_coordination까지 처리해, 만들어진 allocation_candidate(없으면 None)를 반환한다."""
+    """제출하고 검증agent와 supply_coordination까지 처리해, supply_coordination이 받은 기록(없으면 None)을 반환한다."""
     await run_forecast_select_and_submit(
         store, "forecast", "COMPANY-A", item_id, assumptions, rationale
     )
-    candidates = validate_and_allocate(store)
-    return candidates[0] if candidates else None
+    received = validate_and_receive(store)
+    return received[0] if received else None
 
 
 def split_assumptions():
@@ -91,8 +91,7 @@ async def test_no_computed_assumption_sends_nothing_to_supply_coordination_or_va
 
     await run(store, "RAMEN", [])
 
-    assert store.get_field("supply_coordination", "allocation_candidates") == []
-    assert store.queue("allocation_candidates").empty()
+    assert store.queue("supply_coordination").empty()
     assert store.queue("forecast_validation").empty()  # 검증agent 일감이 만들어지지 않는다
     assert store.queue("human_manager").qsize() == 1  # human_manager가 반응할 신호만 간다
 
@@ -104,7 +103,7 @@ async def test_other_instances_proceed_while_one_instance_is_held():
     proceeding = await run(store, "SNACK", fixed_assumptions("SNACK"))
 
     assert held is None and proceeding is not None
-    assert proceeding.allocation == {SNACK: 80.0}
+    assert proceeding.agent_id == SNACK and proceeding.scenario is not None and proceeding.scenario.value == 80.0
     assert record_of(store, 1).scenario is not None
     assert [e.agent_id for e in store.get_field("forecast", "escalation_records")] == [RAMEN]
 
@@ -114,7 +113,7 @@ async def test_zero_request_quantity_is_a_computed_value_not_an_escalation():
 
     candidate = await run(store, "RAMEN", [Assumption(assumption_id="a", value=0.0, forecast_uncertainty=1.0)])
 
-    assert candidate is not None and candidate.allocation == {RAMEN: 0.0}
+    assert candidate is not None and candidate.scenario is not None and candidate.scenario.value == 0.0
     scenario = record_of(store, 0).scenario
     assert scenario is not None and scenario.value == 0.0  # scenario.value = 0 (정상 값)
     assert store.get_field("forecast", "escalation_records") == []
@@ -150,7 +149,7 @@ async def test_a_computed_request_is_not_sent_while_an_open_record_exists_for_th
     candidate = await run(store, "RAMEN", fixed_assumptions("RAMEN"))
 
     assert candidate is None
-    assert store.get_field("supply_coordination", "allocation_candidates") == []
+    assert store.queue("supply_coordination").empty()
 
 
 # --- 요청량을 만들 수 없는 실제 경로: 계산 불가가 오류가 아니라 State 반영으로 이어진다 ---------------
@@ -251,7 +250,7 @@ async def test_unresolved_selection_opens_a_record_keeps_the_median_and_does_not
     candidate = await run(store, "RAMEN", split_assumptions())
 
     assert candidate is None
-    assert store.get_field("supply_coordination", "allocation_candidates") == []
+    assert store.queue("supply_coordination").empty()
     record = record_of(store, 0)
     assert record.scenario is not None and record.scenario.derivation == "median" and record.scenario.value == 110.0
     assert record.selection_basis == "rule"
@@ -271,7 +270,7 @@ async def test_a_clear_leader_does_not_open_a_record_even_if_values_differ_a_lot
 
     candidate = await run(store, "RAMEN", clear_leader)
 
-    assert candidate is not None and candidate.allocation == {RAMEN: 100.0}
+    assert candidate is not None and candidate.scenario is not None and candidate.scenario.value == 100.0
     assert store.get_field("forecast", "escalation_records") == []
 
 
@@ -329,4 +328,4 @@ def test_protocol_has_only_the_selection_unresolved_entry_and_is_looked_up_by_ed
     assert find_protocol_entry([entry], ESCALATION_EDGE, "options_exhausted") is None
     assert find_protocol_entry([entry], "supply_coordination->human_manager", "selection_unresolved") is None
     assert entry.escalation_mode == "intervention" and entry.escalation_target == "human_manager"
-    assert entry.escalation_kind == "rule" and entry.max_rounds is None and entry.repeat_escalation_threshold is None
+    assert entry.escalation_kind == "rule" and entry.max_exchanges is None and entry.repeat_escalation_threshold is None

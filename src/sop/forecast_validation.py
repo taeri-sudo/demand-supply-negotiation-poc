@@ -15,12 +15,12 @@ import pandas as pd
 from .data_source_judgment import last_complete_month
 from .external_data import load_data_end, load_orders
 from .forecast_assumption_validation import validate_assumptions
-from .record_state import FORECAST_VALIDATOR_ROLE_TAG
+from .validation_settings import FORECAST_ROLE_TAG, FORECAST_VALIDATOR_ROLE_TAG
 from .state import ForecastRecord, SuspectedCause
 from .validation_agent import ValidationRules
 
 VALIDATOR_ROLE_TAG = FORECAST_VALIDATOR_ROLE_TAG
-WRITER_ROLE_TAG = "forecast"
+WRITER_ROLE_TAG = FORECAST_ROLE_TAG
 
 # (company_id, item_id) → 그 인스턴스의 과거 월별 요청량
 HistoryProvider = Callable[[str, str], list[float]]

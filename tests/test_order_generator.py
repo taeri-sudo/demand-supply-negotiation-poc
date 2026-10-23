@@ -149,3 +149,105 @@ def test_promotion_raises_order_up_to_level_during_promotion():
 
     window = lambda o: o[(o["order_date"] >= "2015-04-01") & ~o["is_first_order"]]["quantity"].sum()
     assert window(lifted) > window(base)
+
+
+# --- 납기, 수주 식별자, 납품한 양 (M4 수주 생성기 확장) ---------------------------------------------------------------
+
+
+def test_every_order_has_a_unique_demand_id_and_a_due_date_after_the_lead_time():
+    orders = orders_for(pol=policy(lead_time_days=3))
+
+    assert orders["demand_id"].is_unique
+    first = orders[orders["is_first_order"]].iloc[0]
+    later = orders[~orders["is_first_order"]]
+    assert first["due_date"] == first["order_date"]  # 첫 주문은 즉시 입고되는 초기 물량이다
+    assert ((later["due_date"] - later["order_date"]).dt.days == 3).all()  # pyright: ignore[reportAttributeAccessIssue]
+
+
+def test_adding_due_dates_does_not_change_the_orders_themselves():
+    """납기 열을 더해도 주문일·수량은 같은 입력과 시드에서 그대로다(같은 난수열을 쓴다)."""
+    orders = orders_for()
+    again = orders_for(pol=policy(lead_time_days=3))
+
+    pd.testing.assert_frame_equal(orders, again)
+    assert list(orders.columns[:7]) == [
+        "order_date", "company_id", "item_id", "quantity", "is_first_order", "promotion", "is_synthetic",
+    ]
+
+
+def test_the_customer_counts_orders_in_transit_as_stock_and_does_not_order_the_same_amount_again(monkeypatch):
+    """고객사의 재고 정책은 주문했지만 아직 받지 못한 양을 가진 양에 넣는다.
+
+    수요가 일정하고(표준편차 0) 리드타임(6일)이 점검 주기(3일)보다 길면 S = s = 평균 x (리드타임 + 점검 주기)다. 주문마다 주문 직전의
+    재고 위치(보유 + 진행 중인 주문)에 주문량을 더하면 정확히 S가 되어야 한다. 진행 중인 주문을 세지 않으면 이미 주문한 양만큼
+    더 주문하게 되어 이 합이 S를 넘는다.
+    """
+    monkeypatch.setattr("sop.order_generator.MANUAL_ADJUSTMENT_PROB", 0.0)  # 수동 조정 주문은 S에 맞춘 수량이 아니다
+    daily, lead, review = 10.0, 6, 3
+    pos = make_pos(mean=daily, days=500, first="2014-06-01")
+    pos["quantity"] = daily  # 변동 없는 수요
+    pol = policy(review_days=review, lead_time_days=lead, moq=1.0)
+    start = pd.Timestamp("2015-01-01")
+    orders = generate_orders(pos, pol, "ITEM-1", start.date(), date(2015, 9, 30), base_seed=3)
+
+    order_up_to = daily * (lead + review)
+    first, later = orders[orders["is_first_order"]].iloc[0], orders[~orders["is_first_order"]]
+    assert len(later) > 5
+    step = pd.Timedelta(lead, unit="D")
+    placed: dict[pd.Timestamp, float] = {pd.Timestamp(d): float(q) for d, q in zip(later["order_date"], later["quantity"])}
+    arrivals = {day + step: quantity for day, quantity in placed.items()}
+    on_hand = float(first["quantity"])
+    in_transit: dict[pd.Timestamp, float] = {}
+    for day in pd.date_range(start, orders["order_date"].max(), freq="D"):
+        if day in arrivals:  # 도착은 점검보다 먼저, 판매는 점검 뒤에 반영된다
+            on_hand += arrivals[day]
+        in_transit = {a: q for a, q in in_transit.items() if a > day}
+        if day in placed:
+            assert abs(on_hand + sum(in_transit.values()) + placed[day] - order_up_to) < 1e-9, day
+            in_transit[day + step] = placed[day]
+        on_hand = max(0.0, on_hand - daily)
+    overlapping = [day for day in placed if any(other < day < other + step for other in placed)]
+    assert overlapping  # 진행 중인 주문이 있는 상태에서 낸 주문이 실제로 있다
+
+
+def deliveries_for(orders, moq=6.0, end=None, seed=1):
+    from sop.order_generator import simulate_deliveries
+
+    return simulate_deliveries(orders, moq, end or orders["order_date"].max().date(), base_seed=seed)
+
+
+def test_orders_due_after_the_data_end_are_not_delivered_yet_and_older_ones_are_delivered_in_full():
+    orders = orders_for(pol=policy(lead_time_days=3))
+    delivered = deliveries_for(orders)  # 기준일은 마지막 주문일이라 마지막 주문의 납기는 기준일 뒤다
+
+    end = orders["order_date"].max()
+    future = orders["due_date"] > end
+    assert future.any() and (delivered[future] == 0).all()
+    old = orders["due_date"] <= end - pd.DateOffset(days=60)
+    assert old.any() and (delivered[old] == orders["quantity"][old]).all()
+
+
+def test_only_recent_orders_are_delivered_short_in_moq_units_and_never_the_first_order():
+    shorts = []
+    for seed in range(1, 40):  # 확률로 생기는 미납이 어느 시드에서든 최근 구간에만 생기는지 본다
+        orders = orders_for(pol=policy(lead_time_days=3, moq=6.0), seed=seed)
+        delivered = deliveries_for(orders, moq=6.0, seed=seed)
+        end = orders["order_date"].max()
+        past_due = orders["due_date"] <= end
+        short = (delivered < orders["quantity"]) & past_due
+        recent = orders["due_date"] > end - pd.DateOffset(days=60)
+        assert (short <= recent).all()  # 오래된 주문에는 미납이 없다
+        assert (delivered[short] % 6.0 == 0).all() and (delivered >= 0).all()
+        assert not short[orders["is_first_order"]].any()
+        shorts.append(int(short.sum()))
+    assert sum(shorts) > 0  # 미납이 실제로 생긴다
+
+
+def test_deliveries_are_reproducible_and_do_not_change_the_orders():
+    orders = orders_for()
+    before = orders.copy()
+
+    first, second = deliveries_for(orders), deliveries_for(orders)
+
+    pd.testing.assert_series_equal(first, second)
+    pd.testing.assert_frame_equal(orders, before)

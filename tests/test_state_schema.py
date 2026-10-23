@@ -6,6 +6,9 @@ import pytest
 from pydantic import ValidationError
 
 from sop.state import (
+    Allocation,
+    AllocationEntry,
+    CapacityPool,
     Driver,
     EscalationRecord,
     ExcludedAssumption,
@@ -17,11 +20,14 @@ from sop.state import (
     MethodValue,
     NoticeThreshold,
     Assumption,
+    Resolution,
+    RolePermission,
     Scenario,
     SourceRef,
     State,
     SuspectedCause,
     ValidationResult,
+    ValidationSetting,
     suspected_cause_reason,
 )
 
@@ -218,7 +224,7 @@ def test_supply_coordination_to_human_manager_notice_protocol_entry():
         escalation_mode="notice",
         notice_threshold=NoticeThreshold(binding=0.2, non_binding=0.05),
     )
-    assert entry.max_rounds is None
+    assert entry.max_exchanges is None
     assert entry.notice_threshold is not None
     assert entry.notice_threshold.non_binding < entry.notice_threshold.binding
 
@@ -226,15 +232,93 @@ def test_supply_coordination_to_human_manager_notice_protocol_entry():
 def test_escalation_record_mode_distinguishes_notice_from_intervention():
     notice = EscalationRecord(
         trigger_edge="supply_coordination->human_manager", reason="commitment_gap", rationale="약정 차이 초과",
-        mode="notice", status="sent",
+        target_role="human_manager", mode="notice",
     )
-    assert notice.resolution is None
-    default = EscalationRecord(trigger_edge="e", reason="r", rationale="x", status="open")
-    assert default.mode == "intervention" and default.agent_id is None
+    assert notice.resolution is None and notice.status is None  # status는 intervention일 때만
+    default = EscalationRecord(trigger_edge="e", reason="r", rationale="x", target_role="human_manager", status="open")
+    assert default.mode == "intervention" and default.agent_id is None and default.line_id is None and default.deadline is None
     with pytest.raises(ValidationError):
         EscalationRecord.model_validate(
-            {"trigger_edge": "e", "reason": "r", "rationale": "x", "mode": "silent", "status": "open"}
+            {"trigger_edge": "e", "reason": "r", "rationale": "x", "target_role": "human_manager", "mode": "silent", "status": "open"}
         )
+    with pytest.raises(ValidationError):  # 사람의 결정이 없는 notice에는 resolution이 없다
+        EscalationRecord(
+            trigger_edge="e", reason="r", rationale="x", target_role="human_manager", mode="notice",
+            resolution=Resolution(resolved_by="u", ts="t", kind="dismiss"),
+        )
+    with pytest.raises(ValidationError):  # notice에는 status도 없다
+        EscalationRecord(trigger_edge="e", reason="r", rationale="x", target_role="human_manager", mode="notice", status="open")
+    with pytest.raises(ValidationError):  # intervention에는 status가 필요하다
+        EscalationRecord(trigger_edge="e", reason="r", rationale="x", target_role="human_manager", mode="intervention")
+    with pytest.raises(ValidationError):  # 담당은 필수이고 두 사람 중 하나다
+        EscalationRecord.model_validate({"trigger_edge": "e", "reason": "r", "rationale": "x", "status": "open"})
+    with pytest.raises(ValidationError):
+        EscalationRecord(trigger_edge="e", reason="r", rationale="x", target_role="someone", status="open")  # pyright: ignore[reportArgumentType]
+    with pytest.raises(ValidationError):
+        EscalationRecord(trigger_edge="e", reason="r", rationale="x", target_role="human_manager", status="sent")  # pyright: ignore[reportArgumentType]
+
+
+def test_escalation_resolution_carries_who_when_what_kind_and_value():
+    forecast_value = Resolution(resolved_by="u", ts="t", kind="value", value=120.0)
+    floors = Resolution(resolved_by="u", ts="t", kind="value", value={"ORDER-1": 30.0}, note="n")
+    assert forecast_value.value == 120.0 and floors.value == {"ORDER-1": 30.0}
+    assert Resolution(resolved_by="op", ts="t", kind="rerun").value is None
+    with pytest.raises(ValidationError):
+        Resolution(resolved_by="u", ts="t", kind="approve")  # pyright: ignore[reportArgumentType]
+
+
+def test_state_has_nine_top_level_fields_with_allocations_and_validation_settings():
+    assert list(State.model_fields) == [
+        "forecast_records", "capacity_pools", "allocations", "role_logs", "interaction_protocol", "role_permissions",
+        "escalation_records", "agent_cards", "validation_settings",
+    ]
+    assert not hasattr(State(), "allocation_candidates")
+
+
+def test_forecast_record_has_no_pool_key_and_selection_basis_accepts_expiry():
+    assert "pool_key" not in ForecastRecord.model_fields
+    for basis in ("rule", "agent_judgment", "human", "expiry", None):
+        assert ForecastRecord(agent_id="A:I", company_id="A", item_id="I", selection_basis=basis).selection_basis == basis
+    with pytest.raises(ValidationError):
+        ForecastRecord(agent_id="A:I", company_id="A", item_id="I", selection_basis="other")  # pyright: ignore[reportArgumentType]
+
+
+def test_capacity_pool_is_identified_by_the_line_id():
+    pool = CapacityPool(line_id="LINE-1", total_capacity=100, remaining_capacity=80)
+    assert pool.line_id == "LINE-1" and pool.adjustment_history == []
+    assert not {"pool_id", "linked_pool_key"} & set(CapacityPool.model_fields)
+
+
+def test_allocation_is_one_conclusion_per_line_with_typed_entries():
+    entry = AllocationEntry(demand_ref="C:I", demand_kind="forecast", company_id="C", item_id="I", quantity=100, peg="soft")
+    order = AllocationEntry(
+        demand_ref="ORD-1", demand_kind="order", company_id="C", item_id="I", quantity=50, due_date=date(2017, 8, 20), peg="hard"
+    )
+    allocation = Allocation(line_id="LINE-1", cycle="2017-08", entries=[entry, order], log_seq=3)
+    assert allocation.validation is None and entry.due_date is None
+    assert allocation.role_tag == "supply_coordination"  # 작성agent는 기록에서 읽는다
+    empty = Allocation(line_id="LINE-1")  # 시스템을 처음 설정할 때 만드는 빈 기록
+    assert empty.entries == [] and empty.cycle is None and empty.validation is None and empty.log_seq is None
+    assert [e.peg for e in allocation.entries] == ["soft", "hard"]
+    with pytest.raises(ValidationError):
+        AllocationEntry(demand_ref="x", demand_kind="guess", item_id="I", quantity=1, peg="soft")  # pyright: ignore[reportArgumentType]
+    with pytest.raises(ValidationError):
+        AllocationEntry(demand_ref="x", demand_kind="manual", item_id="I", quantity=1, peg="loose")  # pyright: ignore[reportArgumentType]
+
+
+def test_validation_setting_names_the_validator_and_the_point():
+    row = ValidationSetting(role_tag="forecast", validator_role_tag="forecast_validation", validation_point="per_record")
+    assert row.validation_point == "per_record"
+    assert ValidationSetting(role_tag="s", validator_role_tag="v", validation_point="on_conclusion").validation_point == "on_conclusion"
+    with pytest.raises(ValidationError):
+        ValidationSetting(role_tag="s", validator_role_tag="v", validation_point="always")  # pyright: ignore[reportArgumentType]
+
+
+def test_role_permission_access_has_read_write_and_append():
+    for access in ("r", "w", "a"):
+        assert RolePermission(role_tag="x", field_path="f", access=access).access == access  # pyright: ignore[reportArgumentType]
+    with pytest.raises(ValidationError):
+        RolePermission(role_tag="x", field_path="f", access="rw")  # pyright: ignore[reportArgumentType]
 
 
 def test_excluded_driver_reason_is_a_driver_reason_or_a_suspected_cause_reason():

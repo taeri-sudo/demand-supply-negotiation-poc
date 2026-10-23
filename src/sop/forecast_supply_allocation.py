@@ -1,24 +1,20 @@
-"""forecast agent → 검증agent → supply_coordination agent 단방향 최적화 배분 (M1, M3에서 검증 경유로 변경).
+"""forecast agent → 검증agent → supply_coordination agent 단방향 전달 (M1, M3에서 검증 경유로 변경).
 
-GRAPH_FLOW.md "상호작용 세 가지 유형"의 "최적화"에 해당하는 정방향 edge —
-forecast가 정한 최종 요청량(시나리오)을 검증agent(`forecast_validation`)가 판정하고, `passed`면 forecast가
-supply_coordination에게 직접 보내 supply_coordination이 그 값을 그대로 담은 `allocation_candidate` 하나를
-생성한다. 라운드도, capacity 비교도, 응답
-대기도 없다(우선순위 점수 산출은 (회사,item) 인스턴스가 1개뿐이라 경쟁
-자체가 없어 이 마일스톤에서는 값을 그대로 반영하는 것으로 근사 — 실제
-다인스턴스 경쟁 로직은 M4).
+GRAPH_FLOW.md "상호작용 세 가지 유형"의 "최적화"에 해당하는 정방향 edge — forecast가 정한 최종 요청량(시나리오)을 검증agent
+(`forecast_validation`)가 판정하고, `passed` 또는 검증 면제 통과면 forecast가 supply_coordination에게 직접 보낸다. 라운드도, 응답
+대기도 없다. 배분은 supply_coordination의 조율이 한다.
 
 흐름은 세 단계이고 서로 State와 신호(`asyncio.Queue`)로만 이어진다. 신호는 기록의 상태가 바뀔 때 자동으로 가고(`record_state.py`),
 받는 쪽은 기록을 읽어 자기 상태일 때만 일한다.
 1. forecast: 가정 선택까지 끝난 뒤 기록과 그 로그 항목을 한 번의 `update_state`로 쓴다. 보류가 아니면 기록이 "검증 대기"가 되어
-   검증agent에게 신호가 가고, 보류이면 "사람 대기"가 되어 human_manager에게 신호가 간다.
+   검증agent에게 신호가 가고, 보류이면 "업무 대기" 또는 "시스템 대기"가 되어 담당 사람에게 신호가 간다.
 2. 검증agent(`validation_agent.py`): 판정만 기록한다. 기록이 "판정됨"이 되면 forecast에게 신호가 간다. forecast는
    `check_forecast_verdict`로 기록을 읽어 자기 담당 상태일 때만 일한다: "판정됨"에서 `passed`면 `forward_validated_forecast`로
    카드(`agent_cards`)로 고른 다음 agent를 `forward_to`에 써서 넘기고(`select_next_agent`, 기록이 "전달됨"이 되어 그 agent에게 신호가 간다.
    후보가 없거나 여럿이면 escalation), `failed`면 `suspected_causes` 전체를 한 번의 재실행으로 처리해 다시 쓴다. "되돌려짐"(`send_back`)이면
    `misrouted`는 재실행 없이 다음 agent 선택만 다시 하고, 그 밖의 이유는 같은 재실행을 한다.
-3. supply_coordination: `allocate_validated_forecast`가 기록을 읽어 "전달됨"이고 `forward_to`가 자기일 때 `allocation_candidate`를
-   만든다. 자기 카드의 `accepts`와 맞지 않으면 `send_back_misrouted`로 되돌린다.
+3. supply_coordination: `receive_forwarded_forecast`가 기록을 읽어 "전달됨"이고 `forward_to`가 자기일 때 받는다. 자기 카드의
+   `accepts`와 맞지 않으면 `send_back_misrouted`로 되돌린다.
 
 값 문제로 `send_back`을 쓰는 쪽(supply_coordination, plan agent의 infeasible이 트리거)은 plan agent 자체가 아직 없어(M5) 이 모듈에서
 다루지 않는다. 받는 쪽(forecast)의 처리는 `check_forecast_verdict`에 있다.
@@ -56,14 +52,12 @@ from .forecast_steps import (
     apply_steps_to_record,
     run_forecast_steps,
 )
-from .ids import new_id, now_iso
+from .ids import now_iso
 from .logging_utils import log
-from .record_state import record_state
+from .record_state import is_exempt_passed
 from .state import (
-    AllocationCandidate,
     Assumption,
     ForecastRecord,
-    InteractionProtocol,
     LogEvent,
     Scenario,
     SendBack,
@@ -71,23 +65,11 @@ from .state import (
     suspected_cause_reason,
 )
 
-FORECAST_SUPPLY_EDGE = "forecast<->supply_coordination"
 T = TypeVar("T")
 # forecast가 새로 쓰는 값은 아직 검증받지 않았으므로 판정, 넘김, 되돌림을 비운다
 _UNVALIDATED: dict[str, None] = {"validation": None, "forward_to": None, "send_back": None}
 RerunTrigger = Literal["failed_verdict", "send_back"]  # 재실행의 계기: 불합격 판정 또는 send-back
 NextAgentResult = Literal["forwarded", "next_agent_unresolved", "waiting"]
-
-
-def forecast_supply_protocol_entry() -> InteractionProtocol:
-    """`forecast<->supply_coordination` 항목(STATE_SCHEMA.md 5번 절). 정방향·역방향 모두 라운드가 없어 `max_rounds`가 없다."""
-    return InteractionProtocol(
-        edge=FORECAST_SUPPLY_EDGE,
-        repeat_escalation_threshold=2,
-        scope=["forecast", "supply_coordination"],
-        source="initial_design",
-        last_updated=now_iso(),
-    )
 
 
 def _find_forecast_record_index(
@@ -106,19 +88,6 @@ def _find_forecast_record_index(
             return index
     raise ValueError(
         f"forecast_records에 company_id={company_id!r}, item_id={item_id!r} 인스턴스가 없음"
-    )
-
-
-def allocate_forecast_candidate(forecast_agent_id: str, value: float) -> AllocationCandidate:
-    """forecast가 정한 최종 요청량(시나리오)을 그대로 담아 allocation_candidate 1개를 생성.
-
-    우선순위 점수 산출은 회사가 1개뿐이라 경쟁 자체가 없어(M4에서 실제
-    다회사 경쟁 로직 구현), 이번 마일스톤에서는 supply_coordination의
-    agent 판단이 아니라 순수 함수로 근사한다.
-    """
-    return AllocationCandidate(
-        plan_id=new_id("PLAN"),
-        allocation={forecast_agent_id: value},
     )
 
 
@@ -278,21 +247,42 @@ async def run_forecast_select_and_submit(
     return _apply_plan(store, forecast_role_tag, plan, extra_logs)
 
 
+def passed_times(store: StateStore, role_tag: str, record: ForecastRecord) -> dict[str, str | None]:
+    """기록이 통과한 시각. `passed` 판정으로 통과했으면 판정 시각(`validation_ts`), 검증 면제 통과했으면 escalation 처리 시각(`resolution_ts` —
+    사람의 처리는 `resolution.ts`, 시한 초과는 그 처리를 한 시각)이고, 둘 중 하나만 채운다. 같은 기록인지는 같은 종류의 시각끼리만 비교한다."""
+    if not is_exempt_passed(record):
+        return {"validation_ts": record.validation.ts if record.validation is not None else None, "resolution_ts": None}
+    if record.selection_basis == "human":
+        stamps = [
+            e.resolution.ts for e in store.get_field(role_tag, "escalation_records")
+            if e.agent_id == record.agent_id and e.status == "resolved" and e.resolution is not None and e.resolution.kind == "value"
+        ]
+    else:
+        stamps = [
+            entry.payload["expired_at"] for entry in store.negotiation_log(role_tag)
+            if entry.event == "escalation_expired" and entry.agent_id == record.agent_id
+        ]
+    if not stamps:
+        raise ValueError(f"{record.agent_id}: 검증 면제 통과(selection_basis={record.selection_basis})의 처리 시각을 찾을 수 없음")
+    return {"validation_ts": None, "resolution_ts": max(stamps)}
+
+
 def _misrouted_returners(store: StateStore, forecast_role_tag: str, record: ForecastRecord) -> set[str]:
-    """같은 기록(같은 판정)을 `misrouted`로 되돌린 agent. 반송한 agent의 로그(`misrouted_send_back`)에서 찾는다."""
-    validation_ts = record.validation.ts if record.validation is not None else None
+    """같은 기록(같은 판정 또는 같은 escalation 처리)을 `misrouted`로 되돌린 agent. 반송한 agent의 로그(`misrouted_send_back`)에서 찾는다."""
+    times = passed_times(store, forecast_role_tag, record)
     return {
         entry.payload["from_role"]
         for entry in store.negotiation_log(forecast_role_tag)
         if entry.event == "misrouted_send_back" and entry.agent_id == record.agent_id
-        and entry.payload.get("validation_ts") == validation_ts
+        and entry.payload.get("validation_ts") == times["validation_ts"]
+        and entry.payload.get("resolution_ts") == times["resolution_ts"]
     }
 
 
 def select_next_agent(store: StateStore, forecast_role_tag: str, company_id: str, item_id: str) -> NextAgentResult:
     """작성agent가 기록을 읽어 다음 agent를 골라 `forward_to`에 쓴다(GRAPH_FLOW.md "다음 agent 선택").
 
-    - "판정됨"이고 `passed`인 기록, 또는 `misrouted`로 되돌려진 기록(`send_back`을 비우고 다시 고른다)만 대상이다. 그 밖에는 `"waiting"`.
+    - "판정됨"이고 `passed`인 기록(검증 면제 통과 포함), 또는 `misrouted`로 되돌려진 기록(`send_back`을 비우고 다시 고른다)만 대상이다. 그 밖에는 `"waiting"`.
     - 후보(카드의 `known_agents` 중 `accepts`가 맞는 agent, 이 기록을 `misrouted`로 되돌린 agent 제외)가 하나면 `forward_to`에 쓰고
       `"forwarded"`, 후보가 없으면 `no_next_agent`, 여럿이면 `multiple_next_agents` escalation을 만들고 `"next_agent_unresolved"`를 반환한다.
     - 같은 판정을 두 번 넘기지 않는 것은 상태로 판단한다("전달됨"인 기록은 대상이 아니다).
@@ -300,9 +290,10 @@ def select_next_agent(store: StateStore, forecast_role_tag: str, company_id: str
     record_index = _find_forecast_record_index(store, forecast_role_tag, company_id, item_id)
     record_path = f"forecast_records[{record_index}]"
     record = store.get_field(forecast_role_tag, record_path)
-    state = record_state(record, store.get_field(forecast_role_tag, "escalation_records"))
+    state = store.record_state(forecast_role_tag, record_path)
     validation = record.validation
-    if validation is None or validation.status != "passed" or record.scenario is None:
+    passed = is_exempt_passed(record) or (validation is not None and validation.status == "passed")
+    if not passed or record.scenario is None:
         return "waiting"
     if state == "sent_back" and record.send_back is not None and record.send_back.is_misrouted:
         base = record.model_copy(update={"send_back": None, "forward_to": None})
@@ -316,7 +307,7 @@ def select_next_agent(store: StateStore, forecast_role_tag: str, company_id: str
         store.update_state(  # 기록과 로그 항목을 한 번의 State 갱신으로 쓴다
             forecast_role_tag,
             fields=[FieldWrite(record_path, base.model_copy(update={"forward_to": candidates[0]}))],
-            logs=[LogWrite("forwarded", record.agent_id, payload={"validation_ts": validation.ts, "forward_to": candidates[0]})],
+            logs=[LogWrite("forwarded", record.agent_id, payload={**passed_times(store, forecast_role_tag, record), "forward_to": candidates[0]})],
         )
         return "forwarded"
     reason: ForecastEscalationReason = "no_next_agent" if not candidates else "multiple_next_agents"
@@ -325,7 +316,7 @@ def select_next_agent(store: StateStore, forecast_role_tag: str, company_id: str
     ) + (f" (되돌린 agent 제외: {', '.join(sorted(excluded))})" if excluded else "")
     _hold(
         store, forecast_role_tag, record.agent_id, reason, rationale, "next_agent_unresolved",
-        {"reason": reason, "candidates": candidates, "excluded": sorted(excluded), "validation_ts": validation.ts},
+        {"reason": reason, "candidates": candidates, "excluded": sorted(excluded), **passed_times(store, forecast_role_tag, record)},
         record_path, base,
     )
     return "next_agent_unresolved"
@@ -340,7 +331,7 @@ def send_back_misrouted(store: StateStore, receiver_role_tag: str, record_path: 
     """"전달됨" 기록을 받은 agent가 자기 일이 아니라고 판단해 `misrouted`로 되돌린다. `send_back`과 로그 항목(`misrouted_send_back`)을
     한 번의 State 갱신으로 쓴다. 로그의 판정 시각으로 작성agent가 같은 기록에 대한 반송인지 알아본다."""
     record = store.get_field(receiver_role_tag, record_path)
-    state = record_state(record, store.get_field(receiver_role_tag, "escalation_records"))
+    state = store.record_state(receiver_role_tag, record_path)
     if state != "forwarded" or record.forward_to != receiver_role_tag:
         raise ValueError(f"{receiver_role_tag}는 전달받은 기록만 되돌릴 수 있음: {record_path}")
     send_back = SendBack(from_role=receiver_role_tag, suspected_causes=[SuspectedCause(type="misrouted")], ts=now_iso())
@@ -349,47 +340,39 @@ def send_back_misrouted(store: StateStore, receiver_role_tag: str, record_path: 
         fields=[FieldWrite(f"{record_path}.send_back", send_back)],
         logs=[LogWrite(
             "misrouted_send_back", record.agent_id,
-            payload={"from_role": receiver_role_tag, "validation_ts": record.validation.ts if record.validation else None},
+            payload={"from_role": receiver_role_tag, **passed_times(store, receiver_role_tag, record)},
         )],
     )
 
 
-def allocate_validated_forecast(
+def receive_forwarded_forecast(
     store: StateStore, supply_role_tag: str, message: Mapping[str, Any]
-) -> AllocationCandidate | None:
-    """넘어온 기록을 읽어 `allocation_candidate`를 만든다.
+) -> ForecastRecord | None:
+    """넘어온 기록을 읽어 받는다. 받은 기록을 반환하고, 받지 않고 넘어가면 None이다.
 
-    기록이 지금 "전달됨"이고 `forward_to`가 자기이며 `scenario`가 있을 때만 일한다(사람 대기이거나 늦게 도착한 신호이면 아무것도
-    하지 않는다). 자기 카드의 `accepts`가 기록을 낸 agent의 `produces`와 맞지 않으면 자기 일이 아니므로 `misrouted`로 되돌린다.
+    기록이 지금 "전달됨"이고 `forward_to`가 자기이며 `scenario`가 있을 때만 받는다(업무 대기·시스템 대기이거나 늦게 도착한 신호이면
+    아무것도 하지 않는다). 자기 카드의 `accepts`가 기록을 낸 agent의 `produces`와 맞지 않으면 자기 일이 아니므로 `misrouted`로 되돌린다.
     """
     record = store.get_field(supply_role_tag, message["field_path"])
-    state = record_state(record, store.get_field(supply_role_tag, "escalation_records"))
+    state = store.record_state(supply_role_tag, message["field_path"])
     if state != "forwarded" or record.forward_to != supply_role_tag or record.scenario is None:
-        log(supply_role_tag, "allocate_validated_forecast", agent_id=record.agent_id, skipped=state)
+        log(supply_role_tag, "receive_forwarded_forecast", agent_id=record.agent_id, skipped=state)
         return None
     if not accepts_record(store.get_field(supply_role_tag, "agent_cards"), supply_role_tag, record.role_tag):
         send_back_misrouted(store, supply_role_tag, message["field_path"])
         return None
-
-    candidate = allocate_forecast_candidate(record.agent_id, record.scenario.value)
-    store.update_state(  # 후보안과 그 로그 항목을 한 번의 State 갱신으로 쓴다
-        supply_role_tag,
-        fields=[FieldWrite("allocation_candidates", [*store.get_field(supply_role_tag, "allocation_candidates"), candidate])],
-        logs=[LogWrite("allocation_candidate_generated", record.agent_id,
-                       payload={"plan_id": candidate.plan_id, "value": record.scenario.value})],
-    )
-    return candidate
+    return record
 
 
-def process_pending_allocations(store: StateStore, supply_role_tag: str) -> list[AllocationCandidate]:
-    """supply_coordination의 채널(자기 role_tag)에 쌓인 "전달됨" 신호를 모두 처리한다. 채널이 비면 끝난다."""
+def process_forwarded_forecasts(store: StateStore, supply_role_tag: str) -> list[ForecastRecord]:
+    """supply_coordination의 채널(자기 role_tag)에 쌓인 "전달됨" 신호를 모두 처리해 받은 기록을 돌려준다. 채널이 비면 끝난다."""
     queue = store.queue(supply_role_tag)
-    candidates: list[AllocationCandidate] = []
+    received: list[ForecastRecord] = []
     while not queue.empty():
-        candidate = allocate_validated_forecast(store, supply_role_tag, queue.get_nowait())
-        if candidate is not None:
-            candidates.append(candidate)
-    return candidates
+        record = receive_forwarded_forecast(store, supply_role_tag, queue.get_nowait())
+        if record is not None:
+            received.append(record)
+    return received
 
 
 async def _run_guarded(
@@ -528,18 +511,19 @@ async def check_forecast_verdict(
     inputs = handling.inputs
     record_index = _find_forecast_record_index(store, forecast_role_tag, inputs.company_id, inputs.item_id)
     record = store.get_field(forecast_role_tag, f"forecast_records[{record_index}]")
-    state = record_state(record, store.get_field(forecast_role_tag, "escalation_records"))
+    state = store.record_state(forecast_role_tag, f"forecast_records[{record_index}]")
     causes: list[SuspectedCause] = []
     trigger: RerunTrigger = "send_back"
     if state == "sent_back" and record.send_back is not None:
         if record.send_back.is_misrouted:  # 재실행하지 않고 다음 agent 선택만 다시 한다
             return select_next_agent(store, forecast_role_tag, inputs.company_id, inputs.item_id)
         causes = record.send_back.suspected_causes
-    elif state == "judged" and record.validation is not None:
-        if record.validation.status == "passed":
+    elif state == "judged":
+        if is_exempt_passed(record) or (record.validation is not None and record.validation.status == "passed"):
             return select_next_agent(store, forecast_role_tag, inputs.company_id, inputs.item_id)
-        causes = record.validation.suspected_causes  # error 판정이면 비어 있다
-        trigger = "failed_verdict"
+        if record.validation is not None:
+            causes = record.validation.suspected_causes  # error 판정이면 비어 있다
+            trigger = "failed_verdict"
     if not causes:
         return "waiting"
     await rerun_forecast_steps_select_and_submit(store, forecast_role_tag, handling, causes, trigger)

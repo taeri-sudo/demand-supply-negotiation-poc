@@ -1,5 +1,5 @@
 """라운드 누적형 엣지의 같은 의심되는 원인의 연속 횟수: 같은 이유가 `repeat_escalation_threshold`번 연속 반복되면
-`max_rounds` 소진을 기다리지 않고 상위로 확장할지 판단하는 헬퍼 (GRAPH_FLOW.md "검증agent" `failed`).
+`max_exchanges` 소진을 기다리지 않고 상위로 확장할지 판단하는 헬퍼 (GRAPH_FLOW.md "검증agent" `failed`).
 
 이 판단은 `failed`를 받은 작성agent의 몫이고 검증agent는 관여하지 않는다. 연속 횟수는 저장하지 않고 그 엣지의
 `exchanges`를 최근 것부터 훑어 그때그때 계산한다. 센 횟수는 엣지와 이유 단위로만 유효하다 — 다른 엣지로 넘어가면 그

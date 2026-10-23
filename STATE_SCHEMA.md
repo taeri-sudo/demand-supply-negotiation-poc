@@ -70,7 +70,8 @@ forecast agent 인스턴스((회사, item) 조합별 1개)가 State에 남기는
   ],
   cleaning: { applied, count },                             # 표준 정제 적용 기록
   scenario: { value, assumption_ids, derivation } | null,   # 가정들 중에서 택하거나 계산해 정한 최종 요청량과 출처 가정
-                                                            # derivation: "pass_through" | "chosen" | "mean" | "median"
+                                                            # derivation: "pass_through" | "chosen" | "mean" | "median" | null
+                                                            #   (null: 사람이 escalation을 처리해 넣은 값 — 가정에서 만든 값이 아니다)
                                                             # 요청량을 만들 수 없으면 null(아래 "요청량을 만들 수 없을 때")
   selection_basis: "rule" | "agent_judgment" | "human" | "expiry" | null,
                                                             # human: 사람이 escalation을 처리해 넣은 값
@@ -84,7 +85,7 @@ forecast agent 인스턴스((회사, item) 조합별 1개)가 State에 남기는
 }
 
 suspected_cause: {
-  type:   "assumption" | "data_source" | "method_selection",
+  type:   "assumption" | "data_source" | "method_selection" | "allocation",
   issue:  (문제 대상별 문제 내용 — 아래 참고) | null,
   assumption_id: ... | null,                                  # type이 assumption일 때 대상 가정(필수). 다른 type에는 없다
   drivers: [driver] | null,                                  # type이 assumption일 때만. 문제 원인을 지목할 수 있으면 그 원인들, 지목할 수 없으면 null(그 가정의 모든 원인)
@@ -171,6 +172,7 @@ forecast 기록에는 이 인스턴스가 어느 생산라인(풀)에 속하는�
 | `assumption` | `no_evidence`(근거가 스냅샷에 없음) / `value_out_of_range`(가정의 value가 과거 월별 요청량 범위를 벗어남) / `not_distinct`(같은 구성의 가정이 둘 이상) / `double_counted`(한 가정 안 원인 간 근거 중복) — 위 가정 검증 조건과 1:1 대응 |
 | `data_source` | `insufficient`(부족) / `contaminated`(오염) / `irrelevant`(소스 자체가 무관) / `outdated`(시점 기준으로 무관 — `use_from` 필수) |
 | `method_selection` | 없음(가정마다 고른 통계기법 구성이 문제) |
+| `allocation` | `exceeds_supply`(배분 합계가 그 라인의 공급 가능량을 넘음 — 배분 결론 검증 조건과 1:1 대응. `allocations`의 `validation`에만 쓴다) |
 | `misrouted` | 없음(받은 agent가 자기 일이 아니라고 판단함. `send_back`에만 쓰고 `validation`에는 쓰지 않으며, 다른 이유와 함께 보내지 않는다) |
 
 대상 필드는 문제 대상(`type`)별로 정해져 있다. `assumption`에는 `assumption_id`가 필수이고 다른 문제 대상에는
@@ -178,11 +180,13 @@ forecast 기록에는 이 인스턴스가 어느 생산라인(풀)에 속하는�
 원인들, `double_counted`는 근거가 겹치는 원인들을 넣고, `value_out_of_range`와 `not_distinct`는 원인을 지목할 수 없어
 항상 null이다. 빈 목록은 허용하지 않는다(모든 원인은 null로 나타낸다). `data_source`는 `insufficient` 이외의 문제 내용에 `source`가 필요하다. `use_from`은 `outdated`에 필수이고 다른 문제 내용에는 없다. `orders`는 항상 쓰므로 소스를 제외할 수 없어 `orders`는
 `outdated`만 받고, `orders`의 `irrelevant`는 허용되지 않는 판정이다. `method_selection`은 문제 내용과 대상 필드가
-없다. 이 필드로 정해지는 대상 가정과 재실행의 범위는 AGENT_NODE_LIST.md forecast agent "재실행"에 있다.
+없고, `allocation`은 문제 내용 `exceeds_supply`만 받으며 대상 필드가 없다. 이 필드로 정해지는 대상 가정과 재실행의 범위는 AGENT_NODE_LIST.md forecast agent "재실행"에 있다.
 
 의심되는 원인별 재개 지점과 대응은 AGENT_NODE_LIST.md forecast agent "재실행" 참고(`misrouted`는 재실행하지 않는다). send-back·불합격 판정·
 재실행 용어는 GRAPH_FLOW.md "send-back·재실행 관련 용어" 참고.
 검증agent의 불합격 판정(`validation`)과 `send_back`은 같은 형식의 이유를 싣는다. 한 번에 여러 이유를 목록(`suspected_causes`)으로 보낸다.
+`allocation` 유형은 `allocations`의 `validation`에만 쓴다 — forecast 기록의 `validation`과 `send_back`에는 들어올 수 없고, `allocations`의
+`validation`은 `allocation` 유형만 싣는다. 쓰기 규칙을 어기면 State 쓰기가 거부된다.
 
 `validation`은 **현재값만** 유지(이력 전체는 `role_logs`에 쌓임 —
 판단용 현재값과 기록용 스냅샷 분리). 덮어쓰기 전 값은 재실행의 `rerun` 항목 `payload`에 남는다.
@@ -214,7 +218,9 @@ forecast 기록에는 이 인스턴스가 어느 생산라인(풀)에 속하는�
 - **초기값**: `total_capacity`는 시작 시점에 그 라인 item들의 평소 월 수요 ÷ 가동률로 정한다. 가동률은 0.8이다(임시값,
   근거 확인 필요). 가동률은 초기값을 계산할 때만 쓰고, 그 뒤 값은 고정이다. 라인을 늘리면 사람이 `adjustment_history`에
   증가(`delta`, 이유)를 넣는다.
-- **접근 주체는 supply_coordination(r)과 production_plan(r/w)뿐이다.** procurement_plan·logistics_plan의 제약은 여러 요청이
+- **supply_coordination은 읽기만 한다.** 라인의 결론(`allocations`)은 하나이고 조율할 때마다 덮어쓰므로, 조율이 `remaining_capacity`를
+  깎지 않는다. 공급 가능량(재고 + 생산 중 물량 + 이번 주기 잔여 capacity)은 조율할 때마다 이 값으로 다시 계산한다.
+- **접근 주체는 supply_coordination(r), 검증agent `allocation_validation`(r — 배분 합계가 공급 가능량을 넘는지 확인한다), production_plan(r/w)뿐이다.** procurement_plan·logistics_plan의 제약은 여러 요청이
   같은 잔여량을 나눠 갖는 계좌형 공유 자원이 아니라 요청마다 확률분포로 응답하는 구조라 이 필드를 참조하지 않는다
   (AGENT_NODE_LIST.md 각 agent의 데이터 소스).
 
@@ -224,7 +230,8 @@ supply_coordination이 조율을 끝내고 쓰는 **확정된 현재 배분**이
 `role_logs.supply_coordination`의 그 조율 항목 `payload`에 남는다(4번 절). 조율하는 동안 오간 과정은 담지 않는다.
 배분 규칙은 AGENT_NODE_LIST.md supply_coordination agent, 조율 시점은 GRAPH_FLOW.md "조율 흐름"에 있다.
 ```
-{ line_id, cycle,                            # 어느 라인의 어느 계획 주기 배분인지
+{ role_tag: "supply_coordination",           # 기록을 쓴 작성agent. 기록 상태와 검증agent 선택(`validation_settings`)이 이 값을 읽는다
+  line_id, cycle | null,                     # 어느 라인의 어느 계획 주기 배분인지. 첫 조율 전의 빈 기록은 null
   entries: [
     { demand_ref,                            # 예측 수요면 forecast agent_id, 수주·사람이 정한 수량이면 demand_id
       demand_kind: "forecast" | "order" | "manual",
@@ -238,6 +245,9 @@ supply_coordination이 조율을 끝내고 쓰는 **확정된 현재 배분**이
                 suspected_causes, rationale, ts, validator_role_tag } | null
 }
 ```
+- **빈 기록**: 시스템을 처음 설정할 때 `capacity_pools`의 라인마다 빈 기록(`entries` 비어 있음, `cycle`·`validation` null)을 만든다.
+  빈 기록은 값이 없어(`cycle`이 null) 상태가 없고 검증 대기도 아니다. 첫 조율 전에 라인이 보류돼도(`commitments_exceed_capacity` 등)
+  그 라인의 기록이 "업무 대기"나 "시스템 대기"가 되어 담당 사람에게 신호가 간다.
 - `quantity`는 계약 단위의 배수다. 단위가 안 되는 자투리는 배분하지 않고 재고로 남는다.
 - `peg`: M4는 테스트에서 지정하고, M5부터는 production_plan이 정한다. 생산 중 물량(그 물량이 묶인 수주가 있음)은 `hard`다.
 - `validation`은 `forecast_records`와 같은 형식이다. 새 결론을 쓸 때는 아직 검증받지 않았으므로 `validation`을 비운다.
@@ -270,8 +280,8 @@ role_logs: { "{role_tag}": [ { seq, ts, role_tag, agent_id | null, event, round 
   검증 면제 통과한 기록이면 escalation 처리 시각(`resolution_ts` — 사람의 처리는 `resolution.ts`, 시한
   초과는 그 처리를 한 시각)이고, 둘 중 하나만 채운다(GRAPH_FLOW.md "받는 쪽 반송"). `allocation_decided`는 `line_id`, 조율에
   넣은 수요 목록, 공급 가능량, 단계별 배분 결과(미납분·계약 하한·마진·비율), 마지막 순서로 얹은 값, 덮어쓰기 전의
-  `allocations` 항목을 담는다. `resolution_applied`는 escalation 기록과 넣은 값을, `escalation_expired`는 escalation 기록과 시한
-  초과 처리 결과를 담는다.
+  `allocations` 항목을 담는다. `resolution_applied`는 escalation 기록과 넣은 값(forecast 기록이면 덮어쓰기 전 `scenario` 포함)을, `escalation_expired`는 escalation 기록과 시한
+  초과 처리 결과, 처리한 시각(`expired_at`)을 담는다.
 - **`negotiation_log`는 저장하지 않는다.** `role_logs`의 항목을 `seq` 순으로 합쳐 읽는 함수의 결과이고, 역할 사이에서
   이벤트가 어떻게 겹치거나 어긋나는지 볼 때 쓴다. 이력을 읽는 곳은 모두 이 함수를 쓴다.
 - **로그를 판단에 쓰는 곳**(예: 같은 기록에 `misrouted`로 되돌린 agent 찾기)은 `event` 문자열의 값을 해석하지 않고 사건 이름과
@@ -348,7 +358,7 @@ State 필드 단위 접근권한(agent 간, Unity Catalog의 시스템 접근통
 - `field_path`의 인스턴스 인덱스는 와일드카드 `[*]`를 쓸 수 있다. 예: 검증agent `forecast_validation`은
   `forecast_records[*].validation`에만 쓸 수 있어 모든 인스턴스의 판정 기록만 쓰고 다른 필드는 못 쓴다. 인덱스가 없는
   `field_path`(`forecast_records`)는 모든 인덱스와 그 아래 필드를 포함한다.
-- `capacity_pools`: `supply_coordination`(r, 배분 판단용), `production_plan`(r/w, 자기 라인 자원이므로, M5). procurement_plan·
+- `capacity_pools`: `supply_coordination`(r, 배분 판단용), 검증agent `allocation_validation`(r, 공급 가능량 확인용), `production_plan`(r/w, 자기 라인 자원이므로, M5). procurement_plan·
   logistics_plan은 접근하지 않는다(2번 절).
 - `allocations`: `supply_coordination`(w), 검증agent `allocation_validation`(`allocations[*].validation`만 w),
   `human_manager`(r). plan agent(r)는 M5.
@@ -360,7 +370,7 @@ State 필드 단위 접근권한(agent 간, Unity Catalog의 시스템 접근통
 ### 7. `escalation_records[]`
 사람에게 올라간 escalation 기록. 사람은 둘이다 — `human_manager`(업무 판단)와 `system_operator`(시스템 오류). `mode`로 종류를
 구분한다 — `intervention`은 진행을 멈추고 사람의 결정을 기다리는 escalation 기록, `notice`는 알리기만 하고 진행하는
-escalation 기록(사람의 결정이 없으므로 `resolution`이 없음).
+escalation 기록(사람의 결정이 없으므로 `status`와 `resolution`이 없음).
 ```
 { agent_id | null,                       # escalation 기록이 발생한 인스턴스("{company_id}:{item_id}"). 인스턴스와 무관하면 null
   line_id | null,                        # supply_coordination이 라인 단위로 올린 기록이면 그 라인
@@ -369,7 +379,7 @@ escalation 기록(사람의 결정이 없으므로 `resolution`이 없음).
   mode: "intervention" | "notice",
   log_seq,                               # 이 escalation과 관련된 로그 항목의 seq(`role_logs`, 4번 절)
   deadline | null,                       # 응답 시한. 시한 초과 처리가 있는 reason만(아래 표)
-  status: "open" | "resolved" | "expired",
+  status: "open" | "resolved" | "expired" | null,   # intervention일 때만. notice는 null
   resolution: { resolved_by, ts, kind: "value" | "rerun" | "dismiss", value, note } | null }  # intervention일 때만
 ```
 `log_seq`가 가리키는 로그 항목은 escalation 사유를 뒷받침하는 값을 담는다. `forecast_run_error`는 예외 내용이 담긴 로그 항목
@@ -406,15 +416,21 @@ escalation 기록(사람의 결정이 없으므로 `resolution`이 없음).
 
 **사람의 처리(`resolution`)**. 사람이 값을 쓰는 경로는 이것뿐이다.
 - `human_manager`는 `kind: "value"`로 값을 넣는다. forecast의 reason은 요청량(숫자) 하나이고, `commitments_exceed_capacity`는
-  고객사별 하한 수량(`{demand_ref: quantity}`)이다.
-- `system_operator`는 `kind: "rerun"`(고친 뒤 그 인스턴스를 다시 실행 — 첫 실행이었으면 첫 실행, 재실행이었으면 같은 의심되는
-  원인으로) 또는 `kind: "dismiss"`(이번 주기에서 그 인스턴스를 뺌)를 넣는다.
+  고객사별 하한 수량(`{demand_ref: quantity}`), `pegged_exceed_capacity`는 유지할 강한 묶임 수량(`{demand_ref: quantity}`)이다. 라인의
+  두 값은 기록에 직접 쓰지 않고 `resolution`에 남아 다음 조율의 입력이 된다.
+- `system_operator`는 `kind: "rerun"`(실패한 실행을 다시 한다 — `forecast_run_error`는 forecast 실행, `validation_error`는 검증) 또는
+  `kind: "dismiss"`(이번 주기에서 그 인스턴스를 뺌)를 넣는다.
 - **입력 제한**: 값은 넣을 때 확인한다(0 이상, 계약 단위의 배수, 과거 범위를 크게 벗어나면 경고, 같은 입력의 중복 거부).
   agent 경계를 넘는 제약(공급 가능량 등)은 그 값이 배분으로 들어간 뒤 배분 결론의 검증에서 확인되므로 사람이 넣은 값은
   검증agent를 다시 거치지 않는다.
 - **반영**: 처리 함수가 escalation 기록의 `status`(`resolved`)·`resolution`과 값을 받는 기록을 한 번의 `update_state`로 쓴다.
   forecast 기록이면 `scenario.value`에 요청량을, `selection_basis`에 `"human"`을 쓰고 `validation`은 비워 둔다(판정 칸에는
   검증agent의 판정만 쓴다). 기록이 "판정됨"이 되어(GRAPH_FLOW.md "신호 규칙") forecast가 다음 agent로 넘긴다.
+- **값을 넣는 모양**: forecast의 reason에서 `scenario`는 `value`가 넣은 요청량이고 `assumption_ids`는 빈 목록, `derivation`은 null이다(기존
+  `scenario`가 있든 없든 같다). 덮어쓰기 전 `scenario`는 로그 `resolution_applied`의 `payload`에 남는다. 처리할 때 `forward_to`와 `send_back`도
+  비운다(사람이 넣은 값이 이전 값을 대신하므로).
+- **시스템 담당의 처리**: `rerun`은 `validation_error`이면 판정 칸을 비워 기록이 다시 "검증 대기"가 되게 하고, 그 밖의 reason은 처리 상태만
+  바꾼다(기록의 상태가 다시 계산돼 담당 agent에게 신호가 간다). `dismiss`는 기록을 바꾸지 않는다.
 - **시한 초과**: 시한이 되면 스케줄러가 기록을 만든 agent의 채널로 신호를 보내고, 그 agent는 기록이 아직 `open`이고 시한이
   지났으면 위 표의 처리를 한다. `status`를 `expired`로 쓴다. 값으로 진행하는 경우 반영 방식은 사람의 처리와 같고
   `selection_basis`는 `"expiry"`다(`validation`은 비워 둔다). 예측 수요 없이 진행하는 경우 `scenario`와 `selection_basis`는

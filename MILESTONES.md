@@ -27,17 +27,19 @@ M0에서 미리 실물로 넣고, LLM 호출·실데이터 연동·SQLite 영속
 
 아래 세 가지는 특정 마일스톤의 범위가 아니라, 여러 마일스톤에 걸쳐 처음부터 지켜야 나중에 재작업이 발생하지 않는 규칙이다.
 
-**1. 검증agent는 edge를 하드코딩하지 않고 `interaction_protocol`/`role_permissions`를
-읽어 동작한다(M3부터 적용).** 검증agent는 라우팅 권한이 없고 판정만 하며 다음 agent에게
-전달하지 않는다(GRAPH_FLOW.md "검증agent" 참고). 판정을 쓰면 기록이 "판정됨" 상태가 되어 작성agent의
+**1. 검증agent는 edge를 하드코딩하지 않고 `validation_settings`/`role_permissions`를
+읽어 동작한다(M3부터 적용, M4에서 검증 대상 판정을 `interaction_protocol`의 edge 항목에서 `validation_settings`로 옮김).**
+검증agent는 라우팅 권한이 없고 판정만 하며 다음 agent에게
+전달하지 않는다(GRAPH_FLOW.md "검증agent" 참고). 어느 agent의 기록을 어느 검증agent가 검증하는지와 기록이 "검증 대기"인지는
+`validation_settings`(STATE_SCHEMA.md 9번 절)가 정한다. 판정을 쓰면 기록이 "판정됨" 상태가 되어
 작성agent의 채널(`role_tag`)로 신호가 간다(edge별 분기가 필요 없다). `passed`면
 작성agent가 원래 다음 agent에게 직접 보내고, `failed`면 작성agent가 처리하며, `error`는 바로 escalation 기록을 만든다(시스템 대기).
 `if edge == "forecast<->supply_coordination"` 식으로 하드코딩하지 않는다. `interaction_protocol`의
 `max_exchanges`/`repeat_escalation_threshold`/`escalation_target`은 검증agent가
 아니라 `failed`를 받은 작성agent 자신이 재조정할지·상위로 확장할지 판단할 때
 조회한다(검증agent가 그래프 구조 전체를 몰라도 되게 하기 위함). 나중에 새
-edge(예: M5의 회의 엣지)가 추가돼도
-검증agent 코드는 손대지 않고 `interaction_protocol`에 항목만 추가하면 되어야 한다.
+검증 대상 agent(예: M5의 plan agent)가 추가돼도
+검증agent 코드는 손대지 않고 `validation_settings`에 행과 그 agent의 검증 규칙만 추가하면 되어야 한다.
 
 **2. 규칙 기반 판단 스텁은 LLM 구조화 출력과 동일한 pydantic 스키마로 반환한다(M1부터
 적용, M7에서 교체).** forecast(통합된 예측 agent)의 가정 정의·데이터 소스 판단·
@@ -306,7 +308,9 @@ feasibility 판단처럼 M7에서 LLM(②판단계층)으로 교체될 지점은
 
 **검증**
 - 여러 인스턴스(같은 회사의 다른 item, 같은 라인을 함께 쓰는 수요, 혼자 쓰는 라인을 섞음)가 함께 돌 때 배분 결과·`remaining_capacity`·
-  로그가 맞는지, 실행 순서를 바꿔도 같은 배분이 나오는지. M0의 Lock이 이 부하에서도 `remaining_capacity`와 배분 합을 일치시키는지.
+  로그가 맞는지, 실행 순서를 바꿔도 같은 배분이 나오는지. 각 라인의 배분 합계가 공급 가능량(재고 + 생산 중 물량 + 잔여 capacity)을 넘지
+  않는지, 그리고 `remaining_capacity`는 M4의 조율로 바뀌지 않는지(쓰는 쪽은 M5의 production_plan이라 supply_coordination의 쓰기가
+  거부된다). M0의 Lock은 `remaining_capacity`를 증감하는 쪽(M4는 production_plan을 대신하는 테스트 역할)의 경쟁에서 확인한다.
 - 정기 조율: 그 라인 인스턴스 중 처리 중인 것이 있으면 시작하지 않고, 업무 대기·시스템 대기만 남으면 시작해 그 인스턴스를 빼고
   배분하는지. 다른 라인을 기다리지 않는지. 검증 불합격으로 재실행 중인 인스턴스의 결과가 같은 조율에 드는지.
 - 정기 조율 전에 온 변경 신호는 아무 일도 하지 않고, 그 변경이 정기 조율에 함께 들어가는지.

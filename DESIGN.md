@@ -42,8 +42,8 @@ demand-supply-negotiation-poc의 **현재 구현 상태**를 담는 문서. Stat
   `known_agents` 중 `accepts`가 자기 `produces`와 맞는 agent를 `forward_to`에 쓴다(후보가 없거나 여럿이면 escalation, 여럿일 때의 판단은 M7,
   `known_agents` 밖은 쓰기 거부, 중복 전달은 전달됨 상태로 막는다). 받는 agent가 자기 카드의 `accepts`와 맞지 않으면 `send_back`에 `misrouted`를
   써서 되돌리고, forecast는 재실행 없이 반송한 agent를 뺀 후보로 다시 고른다. `send_back` 필드와 되돌려짐 상태, 값 문제 `send_back`을 받은
-  forecast의 재실행은 만들었고, 값 문제 `send_back`을 쓰는 쪽(supply_coordination)과 plan agent 카드는 M5다. `interaction_protocol`에 작성agent의 edge
-  항목이 있어야 신호를 처리하고 작성agent별 검증 규칙이 동작을 정한다. 검증agent의 쓰기 권한은 `forecast_records[*].validation`뿐이다.
+  forecast의 재실행은 만들었고, 값 문제 `send_back`을 쓰는 쪽(supply_coordination)과 plan agent 카드는 M5다. `validation_settings`에 작성agent
+  행이 있어야 기록이 검증 대기가 되고 그 행의 검증agent가 신호를 처리하며, 작성agent별 검증 규칙이 동작을 정한다. 검증agent의 쓰기 권한은 `forecast_records[*].validation`뿐이다.
   `forecast_validation`의 규칙은 가정 검증 조건 4개이고 `assumption` 유형만 보낸다. `failed`는 `suspected_causes` 목록으로 가고 forecast가
   한 번의 재실행으로 처리한다(가장 앞 재개 지점, 단계 순서 적용, 수단 없음 비교는 가정마다 한 번, 제외 이유는 `reasons` 목록에 모두
   기록). `no_evidence`·`double_counted`는 문제 원인을 `drivers`로 지목한다. 검증 절차나 forecast 실행이 예외로 끝나면 재시도 없이 바로
@@ -53,6 +53,16 @@ demand-supply-negotiation-poc의 **현재 구현 상태**를 담는 문서. Stat
   결과다. escalation 긴급도는 코드의 reason→긴급도 대응표로 둔다. 과거 월별 요청량은 forecast와 같은 기준일의 스냅샷 주문 이력에서 읽는다.
   현재 한계: forecast 외 작성agent의 판정 전달과 연속 횟수 헬퍼는 더미 role_tag와 합성한 `exchanges`로만 검증했다. 실제 라운드
   누적형 엣지는 M5, escalation의 사람 처리는 M4다. 판단 근거는 JOURNAL.md 2026-10-08 참고.
+- **M4 (생산라인 단위 조율, 1-4단계 완료)**: State를 라인 기준으로 바꿨다(`allocations`, `validation_settings`, 라인별 `capacity_pools`, 이어서 쓰기 권한 `a`,
+  기록 상태 일곱 가지와 검증 면제 통과, 담당·긴급도·시한 초과 처리를 갖는 reason 대응표). 외부 데이터는 납기와 납품한 양이 붙은 수주, 사람이 정한 수량,
+  계약 조건, 재고·생산 중 물량, 라인 기준 정보를 고정 샘플로 읽는다. 라인 하나의 배분은 수요 합치기와 공급 가능량 위에서 강한 묶임, 미납분, 계약 하한,
+  1개당 마진, 요청량 비율, 계약 단위 순으로 나누고, 하한 초과나 강한 묶임 초과는 그 라인만 보류하며 이전 결론을 유지한다. 배분 결론은 합계가 공급
+  가능량을 넘는지만 검증하고, 불합격이면 입력이 달라졌을 때만 다시 조율한다. 사람의 처리(입력 제한 포함)와 시한 초과 처리를 만들었고 사람이 넣은 값은
+  검증agent를 거치지 않는다. 데이터 대체 가정: 가동률 0.8과 재고·생산 중 물량 스텁은 임시값이다.
+  5단계로 넘길 일: (1) `forecast_run_error` 처리 뒤 첫 실행과 `dismiss` 반영(`dismiss`한 인스턴스는 정기 조율이 기다리지 않음), (2) `commitments_exceed_capacity`와
+  `pegged_exceed_capacity`의 처리 값을 조율 입력에 반영, (3) 시한 초과 신호를 보내는 스케줄러, (4) `allocation_invalid`의 `rerun`은 입력을 비교하지 않고 그 라인을
+  다시 조율(상태만 바꾸면 입력이 같아 다시 `allocation_invalid`가 됨). 아직 없는 것: 조율 흐름(정기 조율 시작 규칙, 이어지는 조율), 확인 응답 방식의 신호
+  전달, N개 인스턴스 통합. 6단계에 남길 한계: 샘플에 앞으로 납기가 올 수주가 적음, 최근 주문이 없는 라인은 초기 capacity가 0.
 
 ## 데이터 출처
 
@@ -123,8 +133,8 @@ Favorita는 Kaggle 대회 규칙상 비상업적 용도로만 쓸 수 있고 재
   사이클 안에서 값 변경이 전파되는 방식(쓰기 시 즉시 큐 신호)은 이벤트 반응형을 유지한다.
   실무 전환 시 주기 시작에 forecast 태스크가 몰릴 수 있어 validation agent에만 적용한
   워커풀 패턴을 forecast에도 적용할 여지를 열어둔다.
-- **검증agent는 판정만 하고 라우팅은 각 agent 자신의 역할로 분리, edge 추가 시 코드 변경 불필요**: 새 edge(더미)를
-  `interaction_protocol`에 항목을 더하는 것만으로 검증agent 코드 수정 없이 같은 흐름을 통과함을 확인했다.
+- **검증agent는 판정만 하고 라우팅은 각 agent 자신의 역할로 분리, 검증 대상 추가 시 코드 변경 불필요**: 새 검증agent(더미)를
+  `validation_settings`에 행을 더하는 것만으로 검증agent 코드 수정 없이 같은 흐름을 통과함을 확인했다.
 
 ## 아직 결정 안 된 것 / 다음에 확인할 것
 

@@ -14,14 +14,13 @@ from sop.agent_cards import VALIDATED_DEMAND_FORECAST, default_agent_cards
 from sop.escalation_records import urgency_of
 from sop.forecast_steps import ForecastRerunHandling
 from sop.forecast_supply_allocation import (
-    allocate_validated_forecast,
     check_forecast_verdict,
     forward_validated_forecast,
+    receive_forwarded_forecast,
     run_forecast_select_and_submit,
     send_back_misrouted,
 )
 from sop.forecast_validation import VALIDATOR_ROLE_TAG
-from sop.record_state import record_state
 from sop.state import AgentCard, ForecastRecord, RolePermission, SendBack, SuspectedCause, ValidationResult
 from sop.validation_agent import process_pending_validations
 from test_forecast_rerun import first_run, make
@@ -35,7 +34,7 @@ OTHER_PERMISSIONS = tuple(
     RolePermission(role_tag=OTHER, field_path=field, access=access)  # pyright: ignore[reportArgumentType]
     for field, access in [
         ("forecast_records", "r"), ("escalation_records", "r"), ("agent_cards", "r"),
-        ("forecast_records[*].send_back", "w"), (f"role_logs.{OTHER}", "w"), ("role_logs", "r"),
+        ("forecast_records[*].send_back", "w"), (f"role_logs.{OTHER}", "a"), ("role_logs", "r"),
     ]
 )
 
@@ -64,7 +63,7 @@ async def passed_store(card_list: list[AgentCard] | None = None) -> StateStore:
 
 
 def state_of(store: StateStore) -> str:
-    return record_state(store.state.forecast_records[0], store.state.escalation_records)
+    return store.record_state(FORECAST, "forecast_records[0]")
 
 
 def pending(store: StateStore) -> dict[str, int]:
@@ -116,8 +115,8 @@ async def test_the_forecast_picks_supply_coordination_by_the_cards():
 
     assert store.state.forecast_records[0].forward_to == SUPPLY and state_of(store) == "forwarded"
     assert pending(store) == {SUPPLY: 1}
-    (candidate,) = [allocate_validated_forecast(store, SUPPLY, store.queue(SUPPLY).get_nowait())]
-    assert candidate is not None and candidate.allocation == {RAMEN: 120.0}
+    received = receive_forwarded_forecast(store, SUPPLY, store.queue(SUPPLY).get_nowait())
+    assert received is not None and received.scenario is not None and received.scenario.value == 120.0
 
 
 @pytest.mark.parametrize(
@@ -142,8 +141,9 @@ async def test_no_candidate_makes_a_no_next_agent_escalation(card_list):
     assert urgency_of(escalation.reason) == "warning"
     record = store.state.forecast_records[0]
     assert record.forward_to is None and record.scenario == before.scenario and record.validation == before.validation
-    assert state_of(store) == "awaiting_human" and pending(store) == {"human_manager": 1}
-    assert allocate_validated_forecast(store, SUPPLY, {"field_path": "forecast_records[0]"}) is None
+    assert escalation.target_role == "system_operator" and escalation.trigger_edge == "forecast->system_operator"
+    assert state_of(store) == "awaiting_system" and pending(store) == {"system_operator": 1}
+    assert receive_forwarded_forecast(store, SUPPLY, {"field_path": "forecast_records[0]"}) is None
 
 
 async def test_several_candidates_make_a_multiple_next_agents_escalation():
@@ -154,7 +154,7 @@ async def test_several_candidates_make_a_multiple_next_agents_escalation():
 
     (escalation,) = store.state.escalation_records
     assert escalation.reason == "multiple_next_agents" and urgency_of(escalation.reason) == "warning"
-    assert store.state.forecast_records[0].forward_to is None and pending(store) == {"human_manager": 1}
+    assert store.state.forecast_records[0].forward_to is None and pending(store) == {"system_operator": 1}
     entry = next(e for e in store.negotiation_log(FORECAST) if e.event == "next_agent_unresolved")
     assert entry.payload["candidates"] == [SUPPLY, OTHER] and escalation.log_seq == entry.seq
 
@@ -189,14 +189,13 @@ async def test_a_receiver_whose_card_does_not_accept_the_record_sends_it_back_as
     ]
     store._state = store.state.model_copy(update={"agent_cards": mismatched})  # pyright: ignore[reportPrivateUsage]
 
-    assert allocate_validated_forecast(store, SUPPLY, {"field_path": "forecast_records[0]"}) is None
+    assert receive_forwarded_forecast(store, SUPPLY, {"field_path": "forecast_records[0]"}) is None
 
     record = store.state.forecast_records[0]
     assert record.send_back is not None and record.send_back.is_misrouted and record.send_back.from_role == SUPPLY
     assert state_of(store) == "sent_back" and pending(store) == {FORECAST: 1}
-    assert store.get_field(SUPPLY, "allocation_candidates") == []
     entry = next(e for e in store.negotiation_log(FORECAST) if e.event == "misrouted_send_back")
-    assert entry.role_tag == SUPPLY and entry.payload == {"from_role": SUPPLY, "validation_ts": record.validation.ts}  # pyright: ignore[reportOptionalMemberAccess]
+    assert entry.role_tag == SUPPLY and entry.payload == {"from_role": SUPPLY, "validation_ts": record.validation.ts, "resolution_ts": None}  # pyright: ignore[reportOptionalMemberAccess]
 
 
 async def test_a_misrouted_record_is_not_rerun_and_the_sender_is_left_out_of_the_candidates():
@@ -213,8 +212,8 @@ async def test_a_misrouted_record_is_not_rerun_and_the_sender_is_left_out_of_the
     assert record.scenario == before.scenario and record.assumptions == before.assumptions and record.validation == before.validation
     assert not [e for e in store.negotiation_log(FORECAST) if e.event == "rerun"]  # 재실행하지 않았다
     assert store.state.escalation_records == [] and pending(store) == {SUPPLY: 1}
-    candidate = allocate_validated_forecast(store, SUPPLY, store.queue(SUPPLY).get_nowait())
-    assert candidate is not None and candidate.allocation == {RAMEN: 120.0}
+    received = receive_forwarded_forecast(store, SUPPLY, store.queue(SUPPLY).get_nowait())
+    assert received is not None and received.scenario is not None and received.scenario.value == 120.0
 
 
 async def test_no_candidate_left_after_the_misroute_makes_a_no_next_agent_escalation():
@@ -228,8 +227,8 @@ async def test_no_candidate_left_after_the_misroute_makes_a_no_next_agent_escala
     (escalation,) = store.state.escalation_records
     assert escalation.reason == "no_next_agent" and "supply_coordination" in escalation.rationale
     record = store.state.forecast_records[0]
-    assert record.forward_to is None and record.send_back is None and state_of(store) == "awaiting_human"
-    assert pending(store) == {"human_manager": 1}
+    assert record.forward_to is None and record.send_back is None and state_of(store) == "awaiting_system"
+    assert pending(store) == {"system_operator": 1}
     assert not [e for e in store.negotiation_log(FORECAST) if e.event == "rerun"]
 
 

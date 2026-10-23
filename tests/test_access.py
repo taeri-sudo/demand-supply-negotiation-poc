@@ -7,7 +7,7 @@ from sop.state import CapacityPool, RolePermission, State
 def make_store() -> StateStore:
     state = State(
         capacity_pools=[
-            CapacityPool(pool_id="POOL-1", total_capacity=100, remaining_capacity=100)
+            CapacityPool(line_id="LINE-1", total_capacity=100, remaining_capacity=100)
         ],
         role_permissions=[
             RolePermission(role_tag="supply_coordination", field_path="capacity_pools", access="r"),
@@ -77,7 +77,7 @@ def test_wildcard_permission_grants_full_access():
 
 
 def wildcard_store() -> StateStore:
-    pools = [CapacityPool(pool_id=f"POOL-{i}", total_capacity=100, remaining_capacity=100) for i in range(3)]
+    pools = [CapacityPool(line_id=f"LINE-{i}", total_capacity=100, remaining_capacity=100) for i in range(3)]
     permissions = [
         RolePermission(role_tag="checker", field_path="capacity_pools[*].remaining_capacity", access="w"),
         RolePermission(role_tag="checker", field_path="capacity_pools", access="r"),
@@ -119,7 +119,7 @@ def held_store(*, escalation_write=True, log_write=True, record_write=True):
     if escalation_write:
         permissions.append(RolePermission(role_tag="f", field_path="escalation_records", access="w"))
     if log_write:
-        permissions.append(RolePermission(role_tag="f", field_path="role_logs.f", access="w"))
+        permissions.append(RolePermission(role_tag="f", field_path="role_logs.f", access="a"))
     records = [ForecastRecord(agent_id="C:I", company_id="C", item_id="I")]
     return StateStore(State(forecast_records=records, role_permissions=permissions))
 
@@ -129,7 +129,7 @@ def held_escalation(store, agent_id="C:I", log_seq=None):
 
     return EscalationRecord(
         agent_id=agent_id, trigger_edge="forecast->human_manager", reason="no_computable_assumption", rationale="x",
-        mode="intervention", log_seq=store.next_log_seq() if log_seq is None else log_seq, status="open",
+        target_role="human_manager", mode="intervention", log_seq=store.next_log_seq() if log_seq is None else log_seq, status="open",
     )
 
 
@@ -214,3 +214,106 @@ def test_the_escalation_must_belong_to_the_instance():
 
     with pytest.raises(ValueError):
         hold(store, escalation=held_escalation(store, agent_id="OTHER"))
+
+
+# --- `a`(이어서 쓰기): 목록 끝에 더하는 쓰기만 허용하고 기존 항목을 고치거나 지우는 쓰기는 거부한다 -------------------------
+
+
+def append_store(*, also_write: bool = False) -> StateStore:
+    from sop.state import EscalationRecord
+
+    permissions = [
+        RolePermission(role_tag="f", field_path="escalation_records", access="a"),
+        RolePermission(role_tag="f", field_path="escalation_records", access="r"),
+        RolePermission(role_tag="f", field_path="role_logs.f", access="a"),
+        RolePermission(role_tag="f", field_path="role_logs", access="r"),
+    ]
+    if also_write:
+        permissions.append(RolePermission(role_tag="f", field_path="escalation_records", access="w"))
+    first = EscalationRecord(trigger_edge="e", reason="r", rationale="첫째", target_role="human_manager", status="open")
+    return StateStore(State(escalation_records=[first], role_permissions=permissions))
+
+
+def extra_escalation(rationale: str = "둘째"):
+    from sop.state import EscalationRecord
+
+    return EscalationRecord(trigger_edge="e", reason="r", rationale=rationale, target_role="system_operator", status="open")
+
+
+def test_append_permission_allows_adding_to_the_end_of_the_list():
+    store = append_store()
+    original = store.state.escalation_records[0]
+
+    store.set_field("f", "escalation_records", [original, extra_escalation()])
+
+    assert [r.rationale for r in store.state.escalation_records] == ["첫째", "둘째"]
+
+
+def test_append_permission_rejects_changing_or_removing_an_existing_item():
+    store = append_store()
+    original = store.state.escalation_records[0]
+    before = store.state
+
+    with pytest.raises(PermissionDenied, match="이어서 쓰기"):
+        store.set_field("f", "escalation_records", [original.model_copy(update={"status": "resolved"}), extra_escalation()])  # 고침
+    with pytest.raises(PermissionDenied, match="이어서 쓰기"):
+        store.set_field("f", "escalation_records", [extra_escalation()])  # 기존 항목을 바꿔치기
+    with pytest.raises(PermissionDenied, match="이어서 쓰기"):
+        store.set_field("f", "escalation_records", [])  # 지움
+
+    assert store.state is before
+
+
+def test_append_permission_does_not_reach_below_the_list():
+    store = append_store()
+    before = store.state
+
+    with pytest.raises(PermissionDenied):
+        store.set_field("f", "escalation_records[0].status", "resolved")  # 항목 안의 필드
+    with pytest.raises(PermissionDenied):
+        store.set_field("f", "escalation_records[0]", before.escalation_records[0])  # 항목 하나
+
+    assert store.state is before
+
+
+def test_a_write_permission_on_the_same_path_allows_any_change():
+    store = append_store(also_write=True)
+
+    store.set_field("f", "escalation_records", [])
+
+    assert store.state.escalation_records == []
+
+
+def test_the_log_is_appended_with_the_append_permission_and_an_existing_entry_cannot_be_changed():
+    store = append_store()
+    first = store.append_log("f", "scenario_decided", agent_id="A")
+    store.append_log("f", "forecast_run_skipped", agent_id="A")
+    assert [e.seq for e in store.state.role_logs["f"]] == [first.seq, first.seq + 1]
+    before = store.state
+
+    edited = [store.state.role_logs["f"][0].model_copy(update={"agent_id": "고침"}), store.state.role_logs["f"][1]]
+    with pytest.raises(PermissionDenied, match="이어서 쓰기"):
+        store.set_field("f", "role_logs.f", edited)  # 기존 항목을 고치는 쓰기
+    with pytest.raises(PermissionDenied, match="이어서 쓰기"):
+        store.set_field("f", "role_logs.f", store.state.role_logs["f"][:1])  # 지우는 쓰기
+
+    assert store.state is before
+
+
+def test_a_log_cannot_be_appended_with_only_a_write_permission_or_for_another_role():
+    store = StateStore(State(role_permissions=[RolePermission(role_tag="f", field_path="role_logs.f", access="w")]))
+
+    with pytest.raises(PermissionDenied, match="이어서 쓸 권한"):
+        store.append_log("f", "scenario_decided")  # 로그는 `a`로 쓴다
+    with pytest.raises(PermissionDenied):
+        append_store().append_log("other", "scenario_decided")
+
+    assert store.state.role_logs == {}
+
+
+def test_a_log_path_can_be_read_through_the_wrapper():
+    store = append_store()
+    entry = store.append_log("f", "scenario_decided", agent_id="A")
+
+    assert store.get_field("f", "role_logs.f") == [entry]
+    assert store.get_field("f", "role_logs.unknown_role") == []  # 아직 로그가 없는 역할은 빈 목록이다
